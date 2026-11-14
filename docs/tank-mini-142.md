@@ -19,6 +19,12 @@ set. No experimental 013 SysEx pacing patch is carried into 142. Work is on
   configuration writes could leave RAM correct while physical flash differed.
   A later erase/program/readback procedure preserved the test data. The old
   013 pacing build still failed the physical multi-message HOST test.
+- On this unit, 142 passed the physical H retention test and applied a single
+  REV Mix SysEx through the tested HOST setup after the user performed the
+  B+C radio-off procedure in H. The standard CC FX toggle also passed. Two
+  consecutive SysEx messages assigned to one press failed with the same
+  requested procedure, but their post-restart radio flag differed.
+  The detailed measurements and their limits are recorded below.
 
 The historical ZIP reports 15 changed bytes / 17 cleared bits for test 1.
 Test 2 has 1,948 changed bytes / 2,354 cleared bits overall; the 7,424-byte FF
@@ -370,12 +376,11 @@ corrupted storage. The comparison now uses the actual prepared image and
 reports the marker separately. The historical raw capture and original report
 were retained; `analysis-after-H.json` records the corrected offline comparison.
 
-This attempt establishes that the expected two-message HOST action did not
-take effect under the tested conditions. It does not identify whether the
-failure concerns physical event handling, HOST connection, SysEx transmission
-or consecutive-message handling. A current-firmware standard MIDI control and
-a single-SysEx HOST test would distinguish those possibilities; the earlier
-PC relay test cannot substitute for them.
+This first attempt establishes that the expected two-message HOST action did
+not take effect under those conditions. By itself it does not identify whether
+the failure concerns physical event handling, HOST connection, SysEx
+transmission or consecutive-message handling. The following tests isolate an
+additional radio route and test single and paired messages separately.
 
 ### Single SysEx and standard MIDI comparison
 
@@ -447,7 +452,7 @@ alone does not establish that the MIDI path is ready. Both reports are retained.
 These results establish neither a Windows MIDI routing bug nor direct USB HOST
 delivery. They also do not establish arbitrary SysEx delivery over Bluetooth.
 
-The `split-radio` preparation variant now performs C/D USB calibration with
+The `split-radio` preparation variant performs C/D USB calibration with
 the native radio disabled, then reinstates the distinct TANK baseline. It
 leaves the radio enabled and its saved flag at 0 for a consistent H handoff.
 After H startup, the user must hold **B+C together for about three seconds**,
@@ -472,3 +477,90 @@ the Bluetooth-off marker is reported separately, like the current-switch
 marker; a legitimate 0/1 change is not classified as payload corruption.
 Readback of the marker after reboot still does not prove radio isolation
 during the physical HOST sequence.
+
+### Isolated single-SysEx HOST result
+
+On 14 November 2026, `split-session-6` completed the physical sequence with
+the powered TANK on Plus HOST, Plus in H, B+C held and released after startup
+and the Bluetooth LED off. The user pressed C once, then D once, and returned
+the powered TANK to the PC. `split-radio-measurement-1/report.json` records
+**FX OFF and REV Mix 73**, with the entire 92-byte live patch matching the
+independent target in two reads. The preset state and saved presets in RAM
+and flash were unchanged. The original TANK snapshot was restored and checked.
+This verifies the requested parameter effects under that physical HOST setup;
+the cabling, LED and physical presses remain user observations rather than a
+USB bus capture.
+
+The Plus did not enumerate after returning from H to U, including one USB-C
+reconnection. A complete restart restored access: select O, disconnect USB-C,
+wait ten seconds, select U, then reconnect USB-C. The subsequent capture in
+`split-radio-plus-after-H-2/report.json` is therefore after both the H test
+and that additional U restart. RAM and saved storage differed from staging
+only at Bluetooth-off byte 23651, changing from 0 to 1. All configuration
+payloads, including SysEx, were intact. The original full configuration,
+24-KiB saved region, bank state and native enabled/connected radio state were
+restored and verified. Physical steps and the USB recovery are recorded in
+`split-session-6/physical-procedure.json`.
+
+### Paired SysEx with radio isolation
+
+The `pair-radio` variant uses the same radio handling but sends FX OFF and
+REV Mix 73 from one C press. D is left unchanged. USB calibration captures
+both actual frames and forwards them consecutively before waiting for either
+acknowledgement. It verifies the complete target patch, then resets and
+verifies the distinct HOST baseline before the physical test. The hardware
+sequence is otherwise the same as `split-radio`, with **C only** and no D
+press. `read-tank`, `finish` and `restore` use the variant and original radio
+state recorded in the immutable session plan.
+
+On 14 November 2026, `pair-radio-session-1` passed this USB calibration with
+both consecutive frames. The C assignment, staged TANK patch and target patch
+were identical to the first failed paired HOST attempt. The only difference
+in the staged Plus configuration was the Bluetooth flag at byte 23651,
+explicitly set to 0 for the physical B+C transition after H startup.
+
+The user confirmed H, the powered TANK on HOST, B+C held and released with
+the Bluetooth LED then off, and one C press. After ten seconds, the powered
+TANK returned to the PC. `pair-radio-measurement-1/report.json` records
+**FX still ON and REV Mix still 47**. Two complete reads agreed, and the
+entire live patch matched the staged baseline exactly. Neither requested
+effect occurred. The preset state and saved presets in RAM and flash were
+unchanged; the original TANK snapshot was restored and verified.
+
+After a complete O/disconnect/wait/U/reconnect sequence, the Plus was read
+and restored in `pair-radio-plus-after-H-1/report.json`. The complete RAM
+configuration and 24-KiB saved region matched staging byte for byte: no stored
+SysEx corruption was detected. Unlike the successful single-message test,
+the Bluetooth-off flag was still **0** after restart, despite the reported
+B+C action and dark LED. This difference remains unexplained; it prevents
+treating the two sessions as proven to have identical native radio state in H.
+
+The pinned B+C handler schedules `STATE+80 = 250` at `0x1e12a84`. When this
+timer expires, it invokes save mode 3, which writes the 12-byte configuration
+tail starting at 23640. USB configuration writes instead schedule the full
+save through `STATE+82`. Thus the full USB save check does not validate the
+physical B+C tail-save path. No native radio-state read was available during
+the physical H test, and the post-restart flag alone cannot reconstruct it.
+
+The complete original TANK snapshot, Plus RAM configuration, saved region,
+bank toggles and native radio state were restored. A final independent read
+of both devices after radio reconnection passed all checks, recorded in
+`pair-radio-session-1/final-restoration-check.json`. Both temporary C/D
+assignments are removed. The firmware image remains the unchanged 142 build.
+
+The measured outcomes under the requested radio-off HOST procedure are:
+
+| Assignment | Measured result |
+| --- | --- |
+| C: one SysEx setting REV Mix to 73 | Mix changed from 47 to 73 |
+| D: channel-1 CC 0/value 0 | FX changed from ON to OFF |
+| C: FX OFF SysEx followed by REV Mix 73 SysEx | Neither effect; full staged patch unchanged |
+
+Radio isolation resolved the extra CC route during PC calibration. The
+physical paired test still produced no target effect, but the radio-state
+uncertainty must be resolved before assigning that failure specifically to
+consecutive SysEx delivery. The single-message result supports using that
+tested parameter command on its own; it does not establish all TANK parameters
+or combinations. No firmware timing patch was made on the strength of this
+result. The updated diagnostic and restoration checks passed all 78 automated
+software tests; these are separate from the hardware measurements above.

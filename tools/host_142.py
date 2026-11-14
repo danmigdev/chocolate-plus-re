@@ -31,12 +31,13 @@ def radio_tools():
 
 
 def images(original, live, variant="pair"):
-    require(variant in ("pair", "split", "split-radio"), "Unknown HOST test variant.")
+    require(variant in ("pair", "split", "pair-radio", "split-radio"), "Unknown HOST test variant.")
+    paired = variant.startswith("pair")
     require(len(original) == usb.CONFIG_BYTES and len(live) == relay.LIVE_SIZE
             and original[0] == 3 and original[23639:23641] == bytes(2)
             and original[relay.C_OFFSET:relay.C_OFFSET + 417] == bytes(417), "Expected unused C on page 1 only.")
     frames = relay.live_frame(70, b"\x49\0")
-    if variant == "pair":
+    if paired:
         frames = relay.live_frame(8, b"\0") + frames
     c = bytearray(417)
     c[0] = 1
@@ -46,7 +47,7 @@ def images(original, live, variant="pair"):
         c[area] = len(frames)
         c[area + 1:area + 1 + len(frames)] = frames
     config = original[:relay.C_OFFSET] + bytes(c) + original[relay.C_OFFSET + 417:]
-    if variant != "pair":
+    if not paired:
         offset = relay.C_OFFSET + 417
         require(original[offset:offset + 417] == bytes(417), "Split test requires unused D.")
         d = bytearray(417)
@@ -55,7 +56,7 @@ def images(original, live, variant="pair"):
             row = 1 + bank * 80
             d[row:row + 5] = b"\1\0\1\0\0"  # Enabled, channel 1, CC 0, value 0.
         config = config[:offset] + bytes(d) + config[offset + 417:]
-    if variant == "split-radio":
+    if variant.endswith("-radio"):
         # H startup enables the radio. Keep its flag consistent with that
         # startup state so one physical B+C hold can disable it before C/D.
         config = config[:-1] + b"\0"
@@ -86,7 +87,7 @@ def load(folder):
             and blobs["plus-saved"][:usb.CONFIG_BYTES] == blobs["plus-original"]
             and len(blobs["tank-state"]) == 4 and len(blobs["tank-ram"]) == len(blobs["tank-flash"]) == relay.BANK_SIZE,
             "Invalid original backup geometry.")
-    if variant == "split-radio":
+    if variant.endswith("-radio"):
         radio = manifest["radio_original"]
         require(type(radio.get("enabled")) is bool and type(radio.get("server_enabled")) is bool
                 and radio.get("off_flag") == blobs["plus-original"][-1]
@@ -146,13 +147,14 @@ def stage_tank(tank, blobs):
             and tank.snapshot() == snapshot(blobs, blobs["tank-staged"]), "TANK staging mismatch.")
 
 
-def calibrate_split(link, tank, blobs, checks, record_check):
-    """Capture actual C/D output, relay it, verify each effect, then reinstate baseline."""
-    sysex = relay.live_frame(70, b"\x49\0")
+def calibrate_host(link, tank, blobs, checks, record_check, include_cc=True):
+    """Capture C's SysEx and optional D CC, relay them, then reinstate baseline."""
+    sysex = usb.expected_frames(blobs["plus-staged"], 2, 0)
     cc = b"\xb0\0\0"
-    tank.allowed.update((sysex, cc))
+    tank.allowed.update(sysex + ([cc] if include_cc else []))
     wanted = bytearray(blobs["tank-staged"])
-    for switch, expected in ((2, [sysex]), (3, [cc])):
+    cases = [(2, sysex)] + ([(3, [cc])] if include_cc else [])
+    for switch, expected in cases:
         before_key = tank.stable()
         require(before_key == wanted, "TANK changed before the next calibrated key event.")
         require(link.read(usb.KEYS, 8) == bytes(8), "Key scanner is busy before USB calibration.")
@@ -174,10 +176,12 @@ def calibrate_split(link, tank, blobs, checks, record_check):
         require(before_relay == before_key, "TANK changed before the PC relay; possible second MIDI path.")
         for frame in actual:
             tank.transmit(frame)
+        # A pair is forwarded consecutively, before waiting for either ACK.
+        for frame in actual:
             if frame[0] == 0xF0:
                 require(tank.wait(0) == b"\0", "TANK did not acknowledge calibrated SysEx.")
         if switch == 2:
-            wanted[70] = 73
+            wanted[:] = relay.expected_live(bytes(wanted), actual, bytes(relay.LIVE_SIZE))
         else:
             wanted[8] = 0
         # A short-message CC has no acknowledgement; allow time before reading.
@@ -186,6 +190,7 @@ def calibrate_split(link, tank, blobs, checks, record_check):
         check.update(expected_live=bytes(wanted).hex(), observed_live=observed.hex(), passed=observed == wanted)
         record_check()
         require(check["passed"], "USB calibration did not produce the expected TANK patch.")
+    require(wanted == blobs["tank-target"], "Calibrated actions do not match the independent HOST target.")
     tank_scope(tank, blobs)  # Remove temporary target permissions before staging for HOST.
     stage_tank(tank, blobs)
     link.write(usb.FLIPS, blobs["plus-flips"])
@@ -203,7 +208,7 @@ def prepare(midi, folder, variant="pair"):
         before = tank.snapshot()
         original, flash = link.read(usb.RAM_BASE, usb.CONFIG_BYTES), link.read(usb.USR_VIEW, usb.FLASH_BYTES)
         flips = link.read(usb.FLIPS, 4)
-        radio = radio_tools() if variant == "split-radio" else None
+        radio = radio_tools() if variant.endswith("-radio") else None
         original_radio = radio.state(link) if radio else None
         require(before == tank.snapshot() and before["state"][0] == before["state"][1]
                 and original == flash[:usb.CONFIG_BYTES] and original == link.read(usb.RAM_BASE, usb.CONFIG_BYTES)
@@ -221,13 +226,14 @@ def prepare(midi, folder, variant="pair"):
         usb.durable_write(folder / "plan.json", (json.dumps(plan, indent=2) + "\n").encode())
         blobs = load(folder)
         tank_scope(tank, blobs)
-        offsets = [relay.C_OFFSET] + ([relay.C_OFFSET + 417] if variant != "pair" else [])
+        offsets = [relay.C_OFFSET] + ([relay.C_OFFSET + 417] if variant.startswith("split") else [])
         config_writes = [(usb.RAM_BASE + offset, config[offset:offset + 417]) for offset in offsets]
         if radio:
             config_writes.append((radio.RADIO_FLAG, b"\0"))
         allowed = list(config_writes)
         if variant != "pair":
-            allowed += [(usb.KEYS + 2 * switch, b"\0\x64") for switch in (2, 3)]
+            keys = (2, 3) if variant.startswith("split") else (2,)
+            allowed += [(usb.KEYS + 2 * switch, b"\0\x64") for switch in keys]
             allowed += [(usb.FLIPS, flips), (usb.RAM_BASE + 23640, config[23640:])]
         if radio: allowed += list(radio.RADIO_WRITES)
         link.allow = tuple(allowed)
@@ -242,7 +248,8 @@ def prepare(midi, folder, variant="pair"):
                 link.write(address, data)
             if variant != "pair":
                 report["USB_calibration"] = []
-                calibrate_split(link, tank, blobs, report["USB_calibration"], lambda: retention.record(path, report))
+                calibrate_host(link, tank, blobs, report["USB_calibration"], lambda: retention.record(path, report),
+                               include_cc=variant.startswith("split"))
                 report["tank_baseline_reinstated_after_calibration"] = True
                 retention.record(path, report)
             if radio:
@@ -384,8 +391,8 @@ def main():
     parser.add_argument("operation", choices=("prepare", "check-usb", "read-tank", "finish", "restore"))
     parser.add_argument("--session", type=Path, required=True)
     parser.add_argument("--output", type=Path)
-    parser.add_argument("--variant", choices=("pair", "split", "split-radio"), default="pair",
-                        help="Preparation only; split-radio isolates native Bluetooth for USB calibration, then requires B+C radio off after H starts.")
+    parser.add_argument("--variant", choices=("pair", "split", "pair-radio", "split-radio"), default="pair",
+                        help="Preparation only; radio variants isolate native Bluetooth for USB calibration, then require B+C radio off after H starts.")
     parser.add_argument("--execute", action="store_true")
     args = parser.parse_args()
     if not args.execute:

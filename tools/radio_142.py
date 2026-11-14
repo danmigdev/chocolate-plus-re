@@ -115,7 +115,7 @@ def run(midi, session, output):
             for address, data in writes: link.write(address, data)
             report["status"] = "USB_calibration_with_radio_off"
             record()
-            host.calibrate_split(link, tank, blobs, report["USB_calibration"], record)
+            host.calibrate_host(link, tank, blobs, report["USB_calibration"], record)
             require(not state(link)["enabled"], "Radio restarted during USB calibration.")
             report["status"] = "checking_radio_path_without_PC_relay"
             record()

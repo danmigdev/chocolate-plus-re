@@ -116,5 +116,28 @@ class RadioTests(unittest.TestCase):
             self.assertEqual(bytes(link.memory), original)
             self.assertEqual(tank.stable(), tank.original)
 
+    def test_paired_radio_variant_keeps_D_empty_and_checks_both_consecutive_SysEx(self):
+        original = config()[:-1] + b"\1"
+        tank = Device()
+        link = RadioController(original, tank)
+        with tempfile.TemporaryDirectory() as directory, patch("builtins.print"), \
+                patch.object(radio.time, "sleep"), patch.object(host.relay, "Tank", return_value=tank), \
+                patch.object(usb, "UsbLink", return_value=link):
+            root = Path(directory)
+            result = host.prepare(None, root / "session", "pair-radio")
+            blobs = host.load(root / "session")
+            self.assertEqual(len(result["USB_calibration"]), 1)
+            check = result["USB_calibration"][0]
+            self.assertTrue(check["passed"])
+            self.assertEqual(len(check["actual_frames"]), 2)
+            observed = bytes.fromhex(check["observed_live"])
+            self.assertEqual((observed[8], observed[70]), (0, 73))
+            self.assertEqual(blobs["plus-staged"][1344:1761], bytes(417))
+            self.assertNotIn((usb.KEYS + 6, b"\0\x64"), link.allow)
+            self.assertEqual(tank.stable(), blobs["tank-staged"])
+            result = host.recover(None, root / "session", root / "recovery")
+            self.assertTrue(result["tank_restored"] and result["plus_restored"])
+            self.assertEqual(bytes(link.memory), original)
+
 
 if __name__ == "__main__": unittest.main()
