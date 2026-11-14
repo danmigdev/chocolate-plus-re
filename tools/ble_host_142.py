@@ -25,6 +25,7 @@ usb, codec = relay.plus, relay.codec
 C, D = relay.C_OFFSET, relay.C_OFFSET + 417
 CONTROLLED = ((0, 2), (8, 1), (12, 1), (70, 2))
 HOST_SENDER = 0x1E119AE
+HOST_TX = 0x13280  # 0x1e11932 selects this 64-byte OUT buffer for HOST port 1.
 
 
 def chunks(address, data, size):
@@ -37,7 +38,8 @@ class Channel:
         self.identity = usb.PROFILES["142"]["identity"] if plus else ble.IDENTITY
         self.base = usb.RAM_BASE if plus else 0
         self.ranges = ((4, usb.RAM_BASE, usb.CONFIG_BYTES), (4, usb.APP_BASE, usb.PROFILES["142"]["app_size"]),
-                       (4, usb.USR_VIEW, usb.FLASH_BYTES), (4, usb.STATE, 260), (4, usb.KEYS, 8), (4, 0x19100, 4)) if plus else ble.RANGES
+                       (4, usb.USR_VIEW, usb.FLASH_BYTES), (4, usb.STATE, 260), (4, usb.KEYS, 8),
+                       (4, 0x19100, 4), (4, HOST_TX, 64)) if plus else ble.RANGES
         self.windows = ((usb.RAM_BASE + C, 834), (usb.RAM_BASE + 23640, 12), (usb.FLIPS, 4), (usb.KEYS, 8)) if plus else ((relay.LIVE, relay.LIVE_SIZE),)
         self.frames, self.queue = ble.Frames(), asyncio.Queue()
         self.verified = self.pinned = False
@@ -329,7 +331,7 @@ def use_paired_cache(client, address, version):
     client._backend._device_info = int(address.replace(":", ""), 16)
 
 
-async def run(args):
+async def run(args, experiment=matrix):
     from bleak import BleakClient, BleakScanner
     args.output.mkdir(parents=True, exist_ok=False)
     report = dict(created_utc=ble.stamp(), firmware_writes=0, topology="Plus HOST -> TANK; two PC BLE configuration links",
@@ -412,7 +414,7 @@ async def run(args):
                     if args.preflight_only:
                         save(status="preflight_complete_no_writes")
                         return report
-                    await matrix(plus, tank, blobs, save)
+                    await experiment(plus, tank, blobs, save)
                 save(status="complete")
             except BaseException as error:
                 save(status="stopped", error=f"{type(error).__name__}: {error}")
@@ -420,7 +422,7 @@ async def run(args):
     return report
 
 
-def main():
+def argument_parser():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--adapter-fragment")
@@ -429,7 +431,11 @@ def main():
     parser.add_argument("--preflight-only", action="store_true")
     parser.add_argument("--restore-from", type=Path)
     parser.add_argument("--execute", action="store_true")
-    args = parser.parse_args()
+    return parser
+
+
+def main():
+    args = argument_parser().parse_args()
     require(not (args.preflight_only and args.restore_from), "Choose preflight or recovery.")
     if not args.execute:
         print(json.dumps(dict(hardware_access=False, firmware_writes=0, cases=[case["name"] for case in cases()],

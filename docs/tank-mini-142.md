@@ -752,3 +752,97 @@ no firmware writes occurred. The diagnostic completed with `tests_passed=false`
 because the paired case failed, while both restoration checks passed.
 The firmware remains the exact upstream 142. The next firmware investigation
 can now focus on how consecutive SysEx messages reach the HOST USB endpoint.
+
+## Native HOST timing sweep
+
+`tools/ble_host_timing_142.py` reuses the BLE identity/firmware checks, recovery
+files and bounded write scope above. It measures delivery success at nominal
+native key-event spacings of 0, 5, 10, 20, 30, 50 and 70 ms. It does not modify
+the firmware or implement a sequence for a physical footswitch.
+
+The 142 timer registration at `0x1e1449e` schedules `0x1e11cf2` every 5 ms.
+For a released switch in state 1, the tap cave returns to `0x1e12006`; its
+counter increments and invokes event 0 once it reaches 15, then clears the
+key state. Advanced alternating mode 1 sends its bank on event 0 through
+`0x1e13198..0x1e131c0`.
+
+The diagnostic primes C and D with one four-byte write at `KEYS+4`:
+`[14, 1, 14-N, 1]`. C therefore fires on the next timer tick and D fires N
+ticks later, for N from 0 to 14. State 1 avoids the C+D combination, which
+requires both keys in state 100. All other keys must be idle. A transport
+that would split the four-byte request is rejected. Thus no second Bluetooth
+write or PC sleep supplies the tested interval. Timer scheduling, the small
+memory-copy window and USB queueing remain unmeasured sources of timing
+uncertainty; these are **nominal event spacings, not USB wire timestamps**.
+
+Each trial resets the muted TANK to FX ON / REV OFF / Mix 47, checks the
+isolated native HOST route, triggers the sequence and makes no request to
+either peer for 0.8 seconds after the acknowledgement. It then checks the
+complete 92-byte target, unchanged preset state, key toggle parity and idle
+scanner. Trial order alternates ascending/descending to reduce ordering bias.
+
+```powershell
+python tools/ble_host_timing_142.py --output artifacts/ble-host-142/timing-run --pair --pair-plus-from artifacts/ble-host-142/identity-run/report.json --execute
+```
+
+`--intervals-ms` accepts distinct multiples of 5 between 0 and 70;
+`--repetitions` accepts 1..20 and defaults to 10. The original concatenated
+pair is also tested up to three times before the separated sweep. Recovery
+uses the same `--restore-from` files and procedure as `ble_host_142.py`.
+
+### Measured timing, 14 November 2026
+
+`artifacts/ble-host-142/timing-1/report.json` completed 73 trials using the
+unchanged upstream 142 application and the same direct HOST connection:
+
+| Delivery | Successful complete targets |
+| --- | --- |
+| Concatenated pair in one C bank | 0 / 3 |
+| Separate C/D banks, same timer tick (0 ms nominal) | 0 / 10 |
+| Separate C/D banks, 5 ms nominal | 10 / 10 |
+| Separate C/D banks, 10 ms nominal | 10 / 10 |
+| Separate C/D banks, 20 ms nominal | 10 / 10 |
+| Separate C/D banks, 30 ms nominal | 10 / 10 |
+| Separate C/D banks, 50 ms nominal | 10 / 10 |
+| Separate C/D banks, 70 ms nominal | 10 / 10 |
+
+Every successful trial produced FX OFF and Mix 73 with all other live bytes
+unchanged. Every failed trial left the staged patch exactly unchanged. The
+HOST callback remained `0x1e119ae` with no native Bluetooth client connection.
+Both complete application configurations and saved regions were restored and
+verified, including TANK preset state and Plus key toggles. The run made 102
+bounded Plus write attempts, 158 TANK live writes and zero firmware writes.
+
+Five milliseconds is the smallest **tested nominal** successful interval;
+neither shorter positive intervals nor a true minimum were measured. Ten
+trials per setting do not establish reliability under every load or for other
+messages. A **20 ms inter-message gap** is the proposed initial firmware value
+for a single-trigger sequence, leaving margin above the shortest tested case.
+It is a design choice to validate after implementation, not a measured
+press-to-sound latency or proof that a firmware patch already works.
+
+### Retained HOST transmit buffer
+
+The timing diagnostic also reads 64 RAM bytes at `0x13280`. The audited buffer
+selector `0x1e11932` chooses this address for HOST port 1, and sender
+`0x1e119ae` passes it to the USB-MIDI packet builder. No MMIO access or buffer
+write is permitted. Reading the retained bytes after delivery is not an
+on-wire capture and does not recover a transfer length or timestamp. Bytes
+beyond the compared message extent can be leftovers from earlier transfers.
+
+For all 13 failing trials, the first 60 retained bytes contained both expected
+messages in order with their expected Code Index Numbers and MIDI bytes. For
+all 60 successful separated trials, the first 32 bytes contained the second
+message. The last event was `05 F7 68 02`: its two unused bytes were nonzero
+instead of the zero padding required by [USB-MIDI 1.0 section 4, tables 4-1
+and 4-2](https://www.usb.org/sites/default/files/midi10.pdf). This appeared in
+both successful and failing trials, so it does not by itself explain the
+failure. Reports distinguish exact bytes, MIDI/CIN content and unused padding;
+the initial capture retains its original exact-prefix comparison.
+
+These results support separating complete messages at the HOST transmit
+boundary and testing a small gap. They do not establish which device or
+USB parsing stage causes the combined-transfer failure. The existing 013
+pacing source already attempted boundary splitting and a delay, but its
+unsuccessful hardware test is not evidence that the same change works on 142;
+any new candidate still needs validation on the current reproducible setup.
