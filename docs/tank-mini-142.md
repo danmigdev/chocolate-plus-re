@@ -405,7 +405,70 @@ forwarded the CC again and observed FX ON; their delayed-read experiments
 did not establish a timing fix. Direct PC CC controls succeeded with the
 Plus MIDI ports both closed and open (`cc-routing-1/report.json`).
 
-These observations require identifying and isolating the extra route before
+These observations required identifying and isolating the extra route before
 using the split workflow as a HOST test. They are not a new direct-HOST
 result or proof that the physical C/D contacts were exercised. The native
 key events used for USB calibration bypass physical contact/debounce.
+
+### Radio isolation and the extra CC route
+
+The user confirmed that only the two separate PC USB cables were connected.
+On 14 November 2026, native Plus readback nevertheless showed its radio
+enabled and a client connection present (handle `0x0050`, client stage
+`0x43`). The configuration's Bluetooth-off flag at byte 23651 was 1 at the
+same time. Restoring that byte alone does not invoke the radio stop handler.
+It is also inside the native saved image, although outside the public
+editor's shorter configuration view. Neither that flag nor the LED alone
+can establish the actual connection state after a raw configuration restore.
+
+`radio_142.py` audits the running radio through the existing USB link. For
+the exact pinned 142 application it can request the stock B+C action: its
+16-bit counter at `STATE+76` is set to 400, then consumed by the stock timer
+at `0x1e12a30`. The pre-toggle flag is explicitly aligned first. This runs
+the normal radio stop/start routine in its native context. It never writes
+firmware, callbacks, live connection handles or the save timer. Busy keys,
+unexpected state or failed readback stop the operation; recovery attempts
+the TANK, radio and full Plus configuration independently.
+
+In `artifacts/host-142/radio-isolation-2/report.json`, both USB calibrations
+passed while the native radio was disabled and both connection handles were
+zero. Neither key changed the TANK before the explicit PC relay. After the
+radio was enabled and the original connection stage returned, one native D
+event changed FX from ON to OFF with **zero PC-forwarded CC messages**.
+This identifies the additional route as the Plus's radio connection. Sending
+another CC from the PC would toggle FX back, explaining the earlier apparent
+failure. Both complete device baselines and the original enabled/connected
+radio state were restored and verified afterwards.
+
+The first radio-isolation attempt waited only for a nonzero connection handle
+and did not observe the final CC effect. Its restoration passed. The successful
+attempt also waited for the original client stage: connection establishment
+alone does not establish that the MIDI path is ready. Both reports are retained.
+These results establish neither a Windows MIDI routing bug nor direct USB HOST
+delivery. They also do not establish arbitrary SysEx delivery over Bluetooth.
+
+The `split-radio` preparation variant now performs C/D USB calibration with
+the native radio disabled, then reinstates the distinct TANK baseline. It
+leaves the radio enabled and its saved flag at 0 for a consistent H handoff.
+After H startup, the user must hold **B+C together for about three seconds**,
+release them and confirm the Bluetooth status LED is off before pressing C
+once, then D once. This physical step must be repeated after any restart in
+the test; disabling the radio earlier in U is not sufficient evidence for H.
+
+```powershell
+python tools/host_142.py prepare --variant split-radio --session artifacts/host-142/isolated-session --execute
+# TANK stays powered. Move its PC USB plug to Plus HOST; start Plus in H.
+# Wait for startup, hold B+C ~3 s, release; confirm Bluetooth status LED off.
+# Press/release C once, then D once. Return the powered TANK's cable to the PC.
+python tools/host_142.py read-tank --session artifacts/host-142/isolated-session --output artifacts/host-142/isolated-readback --execute
+# Return Plus to U.
+python tools/host_142.py finish --session artifacts/host-142/isolated-session --output artifacts/host-142/isolated-plus-after --execute
+```
+
+The immutable plan records the original native radio state for `finish` and
+`restore`. Those operations restore the radio through its native handler and
+then restore the complete original Plus configuration. For this variant,
+the Bluetooth-off marker is reported separately, like the current-switch
+marker; a legitimate 0/1 change is not classified as payload corruption.
+Readback of the marker after reboot still does not prove radio isolation
+during the physical HOST sequence.

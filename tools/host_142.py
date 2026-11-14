@@ -22,8 +22,16 @@ except ImportError:
 usb, require, digest = relay.plus, relay.require, relay.codec.digest
 
 
+def radio_tools():
+    try:
+        from . import radio_142
+    except ImportError:
+        import radio_142
+    return radio_142
+
+
 def images(original, live, variant="pair"):
-    require(variant in ("pair", "split"), "Unknown HOST test variant.")
+    require(variant in ("pair", "split", "split-radio"), "Unknown HOST test variant.")
     require(len(original) == usb.CONFIG_BYTES and len(live) == relay.LIVE_SIZE
             and original[0] == 3 and original[23639:23641] == bytes(2)
             and original[relay.C_OFFSET:relay.C_OFFSET + 417] == bytes(417), "Expected unused C on page 1 only.")
@@ -38,7 +46,7 @@ def images(original, live, variant="pair"):
         c[area] = len(frames)
         c[area + 1:area + 1 + len(frames)] = frames
     config = original[:relay.C_OFFSET] + bytes(c) + original[relay.C_OFFSET + 417:]
-    if variant == "split":
+    if variant != "pair":
         offset = relay.C_OFFSET + 417
         require(original[offset:offset + 417] == bytes(417), "Split test requires unused D.")
         d = bytearray(417)
@@ -47,6 +55,10 @@ def images(original, live, variant="pair"):
             row = 1 + bank * 80
             d[row:row + 5] = b"\1\0\1\0\0"  # Enabled, channel 1, CC 0, value 0.
         config = config[:offset] + bytes(d) + config[offset + 417:]
+    if variant == "split-radio":
+        # H startup enables the radio. Keep its flag consistent with that
+        # startup state so one physical B+C hold can disable it before C/D.
+        config = config[:-1] + b"\0"
     staged = bytearray(live)
     staged[0:2] = bytes(2)  # Mute during the test, restore original level afterwards.
     staged[8] = 1
@@ -74,6 +86,16 @@ def load(folder):
             and blobs["plus-saved"][:usb.CONFIG_BYTES] == blobs["plus-original"]
             and len(blobs["tank-state"]) == 4 and len(blobs["tank-ram"]) == len(blobs["tank-flash"]) == relay.BANK_SIZE,
             "Invalid original backup geometry.")
+    if variant == "split-radio":
+        radio = manifest["radio_original"]
+        require(type(radio.get("enabled")) is bool and type(radio.get("server_enabled")) is bool
+                and radio.get("off_flag") == blobs["plus-original"][-1]
+                and radio["off_flag"] in (0, 1) and radio.get("combo_counter") == 0
+                and all(type(radio.get(k)) is int and 0 <= radio[k] <= 65535
+                        for k in ("server_handle", "client_handle"))
+                and type(radio.get("client_stage")) is int and 0 <= radio["client_stage"] <= 255,
+                "Invalid radio recovery state.")
+        blobs["radio-original"] = radio
     return blobs
 
 
@@ -100,8 +122,21 @@ def restore_tank(tank, blobs):
 
 
 def restore_plus(link, blobs):
-    return retention.restore_link(link, {"original": blobs["plus-original"],
-                                        "saved-original": blobs["plus-saved"], "flips-original": blobs["plus-flips"]})
+    radio_result, radio_error = None, None
+    if "radio-original" in blobs:
+        radio = radio_tools()
+        link.allow = radio.RADIO_WRITES
+        try:
+            radio.set_enabled(link, blobs["radio-original"]["enabled"])
+            radio_result = radio.wait_connections(link, blobs["radio-original"])
+        except BaseException as error:
+            radio_error = error
+    # Restore configuration even if the radio could not reconnect.
+    result = retention.restore_link(link, {"original": blobs["plus-original"],
+                                          "saved-original": blobs["plus-saved"], "flips-original": blobs["plus-flips"]})
+    require(radio_error is None, f"Configuration restored; radio restoration failed: {radio_error}")
+    if radio_result is not None: result["radio_restored"] = radio_result
+    return result
 
 
 def stage_tank(tank, blobs):
@@ -168,6 +203,8 @@ def prepare(midi, folder, variant="pair"):
         before = tank.snapshot()
         original, flash = link.read(usb.RAM_BASE, usb.CONFIG_BYTES), link.read(usb.USR_VIEW, usb.FLASH_BYTES)
         flips = link.read(usb.FLIPS, 4)
+        radio = radio_tools() if variant == "split-radio" else None
+        original_radio = radio.state(link) if radio else None
         require(before == tank.snapshot() and before["state"][0] == before["state"][1]
                 and original == flash[:usb.CONFIG_BYTES] and original == link.read(usb.RAM_BASE, usb.CONFIG_BYTES)
                 and flash == link.read(usb.USR_VIEW, usb.FLASH_BYTES) and link.read(usb.KEYS, 8) == bytes(8),
@@ -179,26 +216,39 @@ def prepare(midi, folder, variant="pair"):
         for name, data in blobs.items():
             usb.durable_write(folder / f"{name}.bin", data)
         plan = dict(version=2, variant=variant, created_utc=retention.stamp(), sha256={name: digest(data) for name, data in blobs.items()})
+        if radio:
+            plan["radio_original"] = original_radio
         usb.durable_write(folder / "plan.json", (json.dumps(plan, indent=2) + "\n").encode())
-        load(folder)
+        blobs = load(folder)
         tank_scope(tank, blobs)
-        offsets = [relay.C_OFFSET] + ([relay.C_OFFSET + 417] if variant == "split" else [])
+        offsets = [relay.C_OFFSET] + ([relay.C_OFFSET + 417] if variant != "pair" else [])
         config_writes = [(usb.RAM_BASE + offset, config[offset:offset + 417]) for offset in offsets]
+        if radio:
+            config_writes.append((radio.RADIO_FLAG, b"\0"))
         allowed = list(config_writes)
-        if variant == "split":
+        if variant != "pair":
             allowed += [(usb.KEYS + 2 * switch, b"\0\x64") for switch in (2, 3)]
             allowed += [(usb.FLIPS, flips), (usb.RAM_BASE + 23640, config[23640:])]
+        if radio: allowed += list(radio.RADIO_WRITES)
         link.allow = tuple(allowed)
         try:
             report["status"] = "staging_usb_control_and_C"
             retention.record(path, report)
+            if radio:
+                report["radio_disabled_for_USB_calibration"] = radio.set_enabled(link, False)
+                retention.record(path, report)
             stage_tank(tank, blobs)
             for address, data in config_writes:
                 link.write(address, data)
-            if variant == "split":
+            if variant != "pair":
                 report["USB_calibration"] = []
                 calibrate_split(link, tank, blobs, report["USB_calibration"], lambda: retention.record(path, report))
                 report["tank_baseline_reinstated_after_calibration"] = True
+                retention.record(path, report)
+            if radio:
+                require(not radio.state(link)["enabled"], "Radio restarted during calibration.")
+                report["radio_enabled_for_H_start"] = radio.set_enabled(link, True)
+                report["requires_physical_BC_radio_off_after_H_start"] = True
                 retention.record(path, report)
             require(link.read(usb.RAM_BASE, usb.CONFIG_BYTES) == config, "Staging differs from expected configuration.")
             report["save"] = usb.wait_saved(link, config + flash[usb.CONFIG_BYTES:])
@@ -262,16 +312,22 @@ def compare_plus_storage(blobs, ram, flash):
     configuration = retention.changes(expected, ram)
     saved = retention.changes(expected + blobs["plus-saved"][usb.CONFIG_BYTES:], flash)
     def data_intact(result):
-        return all(row["offset"] == 23646 and int(row["read"], 16) < 4 for row in result["differences"])
+        return all((row["offset"] == 23646 and int(row["read"], 16) < 4)
+                   or ("radio-original" in blobs and row["offset"] == 23651 and int(row["read"], 16) < 2)
+                   for row in result["differences"])
     # 142 updates the display's current-switch byte in RAM at 0x1e1304c.
     # A physical advanced-mode press does not itself arm the save counter;
     # the protocol-write path at 0x1e13b76 does. After reboot this byte can
     # therefore retain its staged value. It cannot prove which key was pressed.
-    return dict(configuration=configuration, saved=saved,
+    result = dict(configuration=configuration, saved=saved,
                 ram_matches_saved=ram == flash[:usb.CONFIG_BYTES],
                 configuration_data_intact=data_intact(configuration), saved_data_intact=data_intact(saved),
                 current_switch_marker=dict(staged=expected[23646], ram=ram[23646], saved=flash[23646],
                                            proves_physical_C_press=False))
+    if "radio-original" in blobs:
+        result["radio_off_marker"] = dict(staged=expected[23651], ram=ram[23651], saved=flash[23651],
+                                          proves_radio_connection_state=False)
+    return result
 
 
 def finish(midi, folder, output):
@@ -328,7 +384,8 @@ def main():
     parser.add_argument("operation", choices=("prepare", "check-usb", "read-tank", "finish", "restore"))
     parser.add_argument("--session", type=Path, required=True)
     parser.add_argument("--output", type=Path)
-    parser.add_argument("--variant", choices=("pair", "split"), default="pair", help="Preparation only; split calibrates single SysEx C and stock CC D.")
+    parser.add_argument("--variant", choices=("pair", "split", "split-radio"), default="pair",
+                        help="Preparation only; split-radio isolates native Bluetooth for USB calibration, then requires B+C radio off after H starts.")
     parser.add_argument("--execute", action="store_true")
     args = parser.parse_args()
     if not args.execute:

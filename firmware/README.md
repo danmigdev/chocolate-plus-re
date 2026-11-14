@@ -68,7 +68,9 @@ If the pedal is stuck in update/download mode: SincoOTA → *Mandatory upgrade*.
   screen blocks (LED routines).
 - Status LED: PA0 (port A base 0x1e5000: OUT +0, IN +4, DIR +8 (1 = input), PU +0x10, PD +0x14), driven by the 20 ms timer
   0x1e12970 (blink 400 ms / steady). It is off while byte 0x13490+0x5c63 is set = Bluetooth off: stock B+C hold ~2 s
-  toggles it (0x1e1271e Bluetooth off, 0x1e12706 back on). RAM only, not part of the saved settings.
+  toggles it (0x1e12706 Bluetooth off, 0x1e1271e back on). The flag is outside the public 23,646-byte
+  editor view but inside the native 23,652-byte saved image. It is not sufficient to establish the running
+  radio state: native enable bytes at 0x193a0+164/+168 and connection handles at +68/+70 must also be checked.
 - NEVER use 0x1e04a84 as a cave: it is the BLE pairing-record function, reached indirectly when a bond is stored
   (v4 used it -> pedal crashed/disconnected on pairing).
 - 0x1e00406 is NOT unreferenced: it is stock usr_timer_modify(id, 1000 ms), called by the LRC trim timer 0x1e15a40
