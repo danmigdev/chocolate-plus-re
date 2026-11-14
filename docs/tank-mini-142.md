@@ -1,8 +1,9 @@
 # Chocolate Plus / TANK Mini: 142 baseline
 
 This fork starts from upstream commit `9af0be5` and retains the exact 142 patch
-set. No experimental 013 SysEx pacing patch is carried into 142. Work is on
-`dev`; vendor firmware and private device snapshots remain local.
+set. No experimental 013 SysEx pacing patch is carried into 142. Windows
+diagnostic work is on `feat/windows-usb-142-validation`, separate from `dev`;
+vendor firmware and private device snapshots remain local.
 
 ## What is established
 
@@ -25,6 +26,11 @@ set. No experimental 013 SysEx pacing patch is carried into 142. Work is on
   consecutive SysEx messages assigned to one press failed with the same
   requested procedure, but their post-restart radio flag differed.
   The detailed measurements and their limits are recorded below.
+- BLE can read the TANK live patch while the powered TANK is on Plus HOST,
+  Plus is in H and neither device is cabled to the PC. A physical MOD toggle
+  and restoration were observed automatically. The Plus native HOST state
+  was also read through its BLE configuration service during that monitor.
+  This is parameter/state monitoring, not a capture of USB packets.
 
 The historical ZIP reports 15 changed bytes / 17 cleared bits for test 1.
 Test 2 has 1,948 changed bytes / 2,354 cleared bits overall; the 7,424-byte FF
@@ -564,3 +570,88 @@ tested parameter command on its own; it does not establish all TANK parameters
 or combinations. No firmware timing patch was made on the strength of this
 result. The updated diagnostic and restoration checks passed all 78 automated
 software tests; these are separate from the hardware measurements above.
+
+## BLE monitoring with both devices disconnected from the PC's USB
+
+`tools/tank_ble.py` reads the vendor configuration service `AE40`, using
+`AE41` for requests and `AE42` for notifications. The payload is the native
+checksummed `00 59` protocol, without the USB SysEx wrapper or BLE-MIDI
+timestamps. The tool first requires the exact identity `TANK MINI_009`.
+It permits only command `0x11` (identity) and bounded `0x23` reads of the
+92-byte live patch, four-byte preset state and the 1,942-byte saved preset
+banks in RAM and flash. It cannot send parameter, preset or firmware writes.
+
+Hardware access needs `bleak` (tested with Python 3.12 and Bleak 3.0.2 on
+Windows). Offline planning and the unit tests do not require Bleak. Each
+output directory must be new; captures contain private device data and stay
+under ignored `artifacts/`.
+
+```powershell
+python tools/tank_ble.py --output artifacts/ble-142/monitor
+# With the PC Bluetooth radio already on:
+python tools/tank_ble.py --output artifacts/ble-142/monitor --watch 600 --interval 0.5 --execute
+```
+
+The first invocation describes the plan without accessing hardware. The
+second verifies two complete baseline snapshots, polls live/state changes,
+then reads the complete final snapshot and compares it with the baseline.
+Create the `stop` file inside the output directory to end polling early and
+perform the final checks. `report.json` records results and interruptions;
+`ble-configuration.jsonl` records attempted/submitted requests and replies;
+`live-changes.jsonl` records changes. A submitted request is not itself proof
+of a reply. After an interruption, a missing final snapshot must not be
+treated as a successful restoration check.
+
+`--adapter-fragment` checks the Windows default adapter without changing it.
+`--scan-seconds` can extend discovery to 120 seconds for a physical handoff.
+Optional `--pair` requests encrypted Windows pairing only after application
+identity verification; it preserves the resulting association. Pairing may
+store Bluetooth keys but does not write the application preset/configuration
+ranges. Without this option the tool leaves pairing to the OS's existing
+association. It never enables, disables or resets a PC radio.
+
+### Hardware observation, 14 November 2026
+
+The internal RZ616 radio initially found no advertisers; the motherboard had
+no external antennas attached. The user added a Realtek USB Bluetooth 5.0
+adapter and disabled RZ616. A later USB descriptor failure was resolved by
+reconnecting the Realtek to another direct PC port. It then discovered both
+the TANK and, later, the Plus.
+
+Unpaired TANK reads worked but disconnected after approximately 30 seconds.
+The Windows System log recorded BTHUSB events 29 (Security Manager Protocol
+timeout) and 37 (incoming authentication rejected) at both disconnections.
+The second session had obtained 48 live/state samples while Plus was in H.
+An initial default Bleak pairing attempt after identity failed. A separate
+WinRT pairing request with `ConfirmOnly` and `Encryption`, made before GATT
+service access against the previously verified TANK address, returned
+`PAIRED`. No TANK parameter write was sent.
+
+For `tank-watch-paired-2`, the PC connected to the TANK while Plus was O and
+the TANK stayed powered on HOST. After more than one minute of stable reads,
+the user started Plus in H, with neither device cabled to the PC and no B+C
+action after startup. The monitor remained connected. Three separate A
+presses produced these measured MOD states: OFF, ON, OFF. The first press
+therefore made no live change; the other two changed only the MOD byte. The
+monitor completed **506 live/state samples and 1,115 submitted requests**.
+The final complete live patch, preset state and saved RAM/flash banks all
+matched the original baseline. MOD was restored physically with A.
+
+During that same monitor, a read-only Plus probe identified
+`FootCtrlPlus_142-dtnprt` and read 260 native-state bytes and the 12-byte
+configuration tail through AE40. HOST port state was 1 and the output
+callback was `0x1e119ae`, the audited HOST sender. Both native Bluetooth
+enable fields were 1, the server connection handle was nonzero and the
+client connection handle was zero. The configuration's Bluetooth-off flag
+in RAM was also 1:
+this directly confirms that the flag alone does not describe the running
+radio state. The probe used five identity/read requests, with five replies,
+and no configuration writes. It did not modify either firmware.
+
+These observations establish usable wireless parameter monitoring and
+read-only access to Plus state in H. They do not capture the USB bytes
+between Plus and TANK, prove that USB traffic is mirrored on BLE-MIDI, or
+resolve the previous paired-SysEx failure. The tested startup order keeps
+the TANK connected to the PC over BLE before starting Plus in H; connecting
+to a TANK already occupied by the Plus was not established. Evidence remains
+local under `artifacts/ble-142/`.
