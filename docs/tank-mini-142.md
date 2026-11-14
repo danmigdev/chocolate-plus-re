@@ -168,9 +168,9 @@ pointer also matched. Evidence is in `native-after/report.json`. Windows on
 this PC retained the MIDI port name `FootCtrlPlus`; discovery also accepts
 the `SINCO` name used by upstream.
 
-All 42 automated tests passed, including the optional real-backup simulations
-and Windows file-lock test. TANK Mini HOST parameter delivery and persistence
-across U/H restarts remain acceptance tests; no success is inferred from the
+At the end of migration, all 42 automated tests passed, including the optional
+real-backup simulations and Windows file-lock test. Subsequent hardware
+acceptance results are recorded below; no success is inferred from the
 firmware version or the offline checks.
 
 The first installation attempt stopped when Windows denied an atomic local
@@ -265,3 +265,81 @@ emissions. Windows initially failed to enumerate one of the devices. Hub and
 port resets did not resolve it; replacing the second USB cable allowed both
 devices to be recognised together. The first two relay runs stopped at
 preflight without configuration writes because the Plus was not enumerated.
+
+## Physical U/H retention
+
+`retention_142.py` separates staging, measurement and restoration so that a
+real selector transition or power cycle can occur with the PC disconnected.
+It validates immutable backups and reconstructs the exact test image before
+any restoration. `prepare` writes FF into the same 7,620 unused SysEx payload
+bytes as the USB acceptance test. `capture` reads RAM and saved storage twice,
+saves both samples and counts changed bytes, cleared bits and set bits before
+restoring the original full native configuration. Full restoration can also
+repair corruption in active banks outside the diagnostic padding. Firmware,
+bootloader, save counter and callbacks are never written. `--keep-pattern`
+allows a read-only capture between successive physical tests; `restore` is
+the explicit recovery operation if the normal sequence is interrupted.
+
+```powershell
+python tools/retention_142.py prepare --session artifacts/retention-142/session --execute
+# Leave U powered for at least two minutes after the last pattern write.
+# With HOST empty and no footswitches pressed, move to H for >=10 s, then U.
+python tools/retention_142.py capture --session artifacts/retention-142/session --output artifacts/retention-142/after-H --execute
+# If only restoration is needed, use a fresh output directory:
+python tools/retention_142.py restore --session artifacts/retention-142/session --output artifacts/retention-142/recovery --execute
+```
+
+On 14 November 2026, this physical sequence was completed on the connected
+unit. The user confirmed H with HOST empty and no footswitches pressed, then
+U. The PC observed the USB port disappear **196.288 seconds after the last
+pattern write** and remain absent for **54.938 seconds**. USB presence alone
+does not identify the selector position; the physical H setting is a user
+observation recorded separately. The two configuration RAM samples and two
+24-KiB saved-region samples were identical to the staged images: **zero
+changed bytes, zero cleared bits and zero set bits**. The entire original
+configuration, saved region and runtime bank toggles were restored and
+verified afterwards. Local evidence is in `artifacts/retention-142/session-1/`
+and `artifacts/retention-142/after-H-1/`.
+
+The stored-SysEx corruption was therefore **not reproduced in this physical
+H cycle on 142**. This is one tested transition, not a guarantee for every
+unit, configuration, startup sequence or power-loss condition.
+
+## Direct HOST measurement workflow
+
+`host_142.py` stages a distinct live-patch marker on the TANK and two identical
+banks on unused C: each sends FX OFF followed by raw REV Mix 73. The PC stages
+FX ON and Mix 47, disables REV and temporarily mutes the preset. The target
+Mix 73 is not sent from the PC during staging. Saved presets remain read-only.
+Immutable backups precede any mutation. C's identical banks remove ambiguity
+from bank-toggle state after startup.
+
+First disconnect and reconnect only the TANK's USB cable while keeping it
+powered. `check-usb` requires its complete live patch, state and saved presets
+to remain equal to the staged baseline. Only after this passes, connect the
+TANK's cable to the Plus HOST port, start the Plus in H, wait for startup and
+press C once. Keep the TANK powered while returning its USB cable to the PC.
+`read-tank` captures its full state before restoring the original live patch
+and checking saved-preset integrity. Return the Plus to U; `finish` captures
+its stored configuration and restores the original configuration, including
+empty C. The native last-switch field changing to C is recorded separately
+from corruption. Physical cable routing and the C press are user observations;
+the expected parameter changes are measured by USB readback.
+
+```powershell
+python tools/host_142.py prepare --session artifacts/host-142/session --execute
+# Disconnect and reconnect TANK USB, without powering it off.
+python tools/host_142.py check-usb --session artifacts/host-142/session --output artifacts/host-142/control --execute
+# TANK to Plus HOST, Plus to H, wait for startup, press C, wait, TANK back to PC.
+python tools/host_142.py read-tank --session artifacts/host-142/session --output artifacts/host-142/measurement --execute
+# Plus back to U; both devices now on their separate PC USB cables.
+python tools/host_142.py finish --session artifacts/host-142/session --output artifacts/host-142/plus-after --execute
+# To abort and restore, connect both to the PC (Plus in U), use a fresh output:
+python tools/host_142.py restore --session artifacts/host-142/session --output artifacts/host-142/recovery --execute
+```
+
+The explicit recovery attempts both devices independently. An unavailable
+device is reported and does not prevent restoring the other one. Keep the
+local backups until both restoration checks have passed. A HOST result is
+established only after the physical sequence and measured target match;
+the preparation or a simulated test alone cannot establish delivery.
