@@ -140,12 +140,17 @@ def values(live, state):
 
 
 async def pair_windows(reader):
-    """Use encrypted Just Works pairing for this verified, display-less BLE peer."""
-    require(reader.verified, "Verify the exact TANK identity before pairing.")
+    """Use encrypted Just Works pairing after the reader verified its exact peer."""
+    require(reader.verified, "Verify the exact application identity before pairing.")
+    return await _pair_windows_address(reader.client.address)
+
+
+async def _pair_windows_address(address):
+    """Internal transport operation; caller must verify which peer this address identifies."""
     from winrt.windows.devices.bluetooth import BluetoothLEDevice
     from winrt.windows.devices.enumeration import DeviceInformation, DevicePairingKinds, DevicePairingProtectionLevel
-    device = await BluetoothLEDevice.from_bluetooth_address_async(int(reader.client.address.replace(":", ""), 16))
-    require(device is not None, "Verified TANK is no longer available for pairing.")
+    device = await BluetoothLEDevice.from_bluetooth_address_async(int(address.replace(":", ""), 16))
+    require(device is not None, "Verified device is no longer available for pairing.")
     token = None
     try:
         info = await DeviceInformation.create_from_id_async(device.device_information.id)
@@ -158,7 +163,7 @@ async def pair_windows(reader):
         token = pairing.add_pairing_requested(requested)
         result = await asyncio.wait_for(pairing.pair_with_protection_level_async(
             DevicePairingKinds.CONFIRM_ONLY, DevicePairingProtectionLevel.ENCRYPTION), 45)
-        require(result.status.name in ("PAIRED", "ALREADY_PAIRED"), f"TANK pairing failed: {result.status.name}.")
+        require(result.status.name in ("PAIRED", "ALREADY_PAIRED"), f"Device pairing failed: {result.status.name}.")
         return result.status.name
     finally:
         if token is not None:

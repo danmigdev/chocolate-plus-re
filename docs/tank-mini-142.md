@@ -31,6 +31,11 @@ vendor firmware and private device snapshots remain local.
   and restoration were observed automatically. The Plus native HOST state
   was also read through its BLE configuration service during that monitor.
   This is parameter/state monitoring, not a capture of USB packets.
+- A subsequent automatic HOST comparison, with the native Bluetooth client
+  disconnected and both diagnostic BLE links active, reproduced the paired
+  failure: each message worked individually, but neither effect occurred
+  when both messages were concatenated in one bank. Both devices were fully
+  restored. See the automatic BLE HOST comparison below.
 
 The historical ZIP reports 15 changed bytes / 17 cleared bits for test 1.
 Test 2 has 1,948 changed bytes / 2,354 cleared bits overall; the 7,424-byte FF
@@ -655,3 +660,95 @@ resolve the previous paired-SysEx failure. The tested startup order keeps
 the TANK connected to the PC over BLE before starting Plus in H; connecting
 to a TANK already occupied by the Plus was not established. Evidence remains
 local under `artifacts/ble-142/`.
+
+## Automatic HOST comparison over BLE
+
+`tools/ble_host_142.py` compares three configurations using the same messages
+and live baseline. It connects to TANK first, then Plus in H. The PC sends
+configuration requests over the two AE40 links and does **not** forward MIDI
+between the devices. Native short-tap requests trigger the existing 142
+switch handler and HOST sender; physical footswitches are not pressed.
+
+Before any application write, the tool verifies the exact identities, the
+complete running 142 application SHA-256 and the native save pointer. It
+captures two matching complete configurations/saved regions and checks the
+TANK live patch, preset state and saved banks. C and D must be unused, with
+advanced mode and only page 1 active. Private recovery files are written
+durably before the first change.
+
+HOST routing checks require port state 1, output callback `0x1e119ae`, an idle
+key scanner and a zero native Bluetooth client handle. In pinned 142 the
+slot search at `0x1e0dacc..0x1e0daee` iterates exactly once: `STATE+70` is the
+client handle, with index 0 and stage at `STATE+5`. Adjacent words at +72 and
++74 are other state fields, not extra connection handles. The nonzero server
+handle belongs to the PC's diagnostic connection.
+
+The exact write scope covers temporary C/D assignments, the original
+configuration tail and bank toggles, native key requests, and four TANK live
+fields: volume, FX enable, REV enable and REV Mix. Firmware, radio controls,
+callbacks and saved TANK presets cannot be written. The TANK is temporarily
+muted, FX enabled, REV disabled and Mix set to 47 before each case. The tool
+verifies the Plus configuration in both RAM and saved storage before sending.
+No TANK BLE request is made during the 0.8-second HOST delivery window.
+
+```powershell
+# Offline plan; no hardware access.
+python tools/ble_host_142.py --output artifacts/ble-host-142/run
+# Keep TANK powered on HOST. Connect its BLE link first with Plus O,
+# then start Plus in H when the tool reports waiting_for_plus_H.
+python tools/ble_host_142.py --output artifacts/ble-host-142/run --pair --execute
+```
+
+`--pair` handles Windows association for the verified TANK. The Plus also
+requested authentication on this PC and unpaired reads ended after about
+30 seconds with BTHUSB events 29 and 37. Pairing after opening GATT failed.
+Pairing before GATT, immediately after discovering the Plus while the PC
+already held the TANK connection, succeeded. For that case, supply a previous
+report that verified the exact Plus identity and Bluetooth address:
+
+```powershell
+python tools/ble_host_142.py --output artifacts/ble-host-142/next --pair --pair-plus-from artifacts/ble-host-142/identity-run/report.json --execute
+```
+
+The evidence is checked against the discovered peer before pairing; its
+identity and complete firmware are verified again after connecting. Once
+paired, Windows can retain the Plus HID connection, so the Plus may disappear
+from advertisement scans even while connected. The same option can reuse
+Windows' paired-device cache after checking the name and association. This
+fallback uses a narrowly pinned **Bleak 3.0.2 WinRT** internal cache key;
+other versions/backends are rejected. Both Windows associations are retained.
+
+`--preflight-only` captures the recovery baseline without application writes.
+If an interrupted session needs recovery, use a new output directory and
+`--restore-from <session-folder>`; recovery hashes and geometry are checked,
+and the complete running firmware is verified before writing. Normal runs
+restore both devices even if a case fails. A failure to restore one device
+does not skip restoration of the other. A missing acknowledgement is never
+treated as permission to retry a write. Reports distinguish a completed
+diagnostic with a failed case from an interrupted diagnostic or failed recovery.
+
+### Measured comparison, 14 November 2026
+
+`artifacts/ble-host-142/matrix-5/report.json` completed all three cases:
+
+| Case | HOST action | Measured TANK result |
+| --- | --- | --- |
+| Single | C: REV Mix 73 SysEx | FX stayed ON; Mix changed 47 -> 73 |
+| Paired | C: FX OFF SysEx followed by REV Mix 73 SysEx in the same bank | FX stayed ON and Mix stayed 47; neither effect occurred |
+| Separated | C: FX OFF SysEx; later D: REV Mix 73 SysEx | First FX OFF / Mix 47, then FX OFF / Mix 73 |
+
+The entire 92-byte patch matched each successful target, and the paired case
+matched its staged baseline exactly. The paired C assignment was byte-for-byte
+identical to the earlier failed physical `pair-radio-session-1` assignment.
+The HOST callback and zero native client handle were checked before and after
+each trigger. Thus this comparison resolves the earlier native radio-state
+uncertainty for this session. It does not by itself identify the faulty USB
+packet or prove whether aggregation, framing or timing is responsible.
+
+Restoration matched the complete original TANK live/state/saved RAM/saved flash
+and Plus RAM configuration/saved region/bank toggles, with the key scanner idle.
+There were 41 bounded Plus write attempts and 16 TANK live write attempts;
+no firmware writes occurred. The diagnostic completed with `tests_passed=false`
+because the paired case failed, while both restoration checks passed.
+The firmware remains the exact upstream 142. The next firmware investigation
+can now focus on how consecutive SysEx messages reach the HOST USB endpoint.
