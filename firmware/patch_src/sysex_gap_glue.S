@@ -2,6 +2,7 @@
 .global ch_boundary_glue
 .global ch_after_send_glue
 .global native_save
+.global ch_clock_half_ms
 
 ch_boundary_glue:
     r0 = r8
@@ -30,6 +31,18 @@ native_save:
     [--sp] = {rets, r7-r4}
     sp += -48
     goto native_save_continue
+
+/* The native interpolated clock adjusts its cached tick state. Serialize only
+ * that short sample against IRQs; never keep IRQs disabled during the wait.
+ */
+ch_clock_half_ms:
+    [--sp] = {rets, r4}
+    call native_irq_disable
+    call native_clock_raw
+    r4 = r0
+    call native_irq_enable
+    r0 = r4
+    {pc, r4} = [sp++]
 
 .section .hook_boundary,"ax",@progbits
     goto ch_boundary_glue

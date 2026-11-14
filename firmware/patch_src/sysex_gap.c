@@ -8,6 +8,7 @@ extern unsigned int native_user_flash;
 extern volatile unsigned char native_vm_flags;
 extern const unsigned char *native_usb_buffer(unsigned int port);
 extern void native_task_delay(int ticks);
+extern unsigned int ch_clock_half_ms(void); /* short IRQ-protected native read */
 extern void native_settings_lock(void);
 extern void native_settings_unlock(void);
 extern int native_flash_read(void *data, unsigned int address, unsigned int length);
@@ -42,7 +43,7 @@ int ch_gap_decode(const unsigned char *p)
 {
     unsigned int ms = le16(p + 6);
     if (p[0] != 'S' || p[1] != 'G' || p[2] != 'A' || p[3] != 'P' ||
-        p[4] != 1 || p[5] != CH_GAP_STEP_MS ||
+        p[4] != 1 || (p[5] != CH_GAP_STEP_MS && !(p[5] == 10 && ms % 10 == 0)) ||
         ms > CH_GAP_MAX_MS || ms % CH_GAP_STEP_MS ||
         le16(p + 8) != (ms ^ 0xffff) || le16(p + 10) != CH_GAP_MAX_MS ||
         le16(p + 12) != CH_GAP_DEFAULT_MS || le16(p + 14) != checksum(p))
@@ -101,10 +102,39 @@ int ch_host_boundary(const unsigned char *chunk, unsigned int length)
     return native_output_callback == CH_HOST_CALLBACK && ends_sysex(chunk, length);
 }
 
+static unsigned int elapsed_units(unsigned int start, unsigned int now)
+{
+    /* The native clock wraps at 0xa0000000, NOT at UINT32_MAX. */
+    return now >= start ? now - start : CH_CLOCK_PERIOD - start + now;
+}
+
+static void wait_gap(unsigned int ms)
+{
+    unsigned int start, elapsed, remaining, target;
+    if (!ms)
+        return;
+    start = ch_clock_half_ms();
+    /* One extra half-ms unit covers quantization at the initial sample.
+     * A fractional initial phase must not shorten the requested wait.
+     */
+    target = ms * CH_CLOCK_UNITS_PER_MS + 1;
+    for (;;) {
+        elapsed = elapsed_units(start, ch_clock_half_ms());
+        if (elapsed >= target)
+            return;
+        remaining = target - elapsed;
+        if (remaining > CH_CLOCK_UNITS_PER_TICK)
+            native_task_delay((int)((remaining - 1) / CH_CLOCK_UNITS_PER_TICK));
+        /* At most the final 10 ms is polled. IRQs remain enabled between
+         * short clock samples, so USB, key timers and OS preemption continue.
+         */
+    }
+}
+
 /* Called by midi_route AFTER submission and native IRQ re-enable. The task
- * cannot build/submit the next packet while it sleeps; USB interrupts can run.
- * No initial wait, no busy wait, no sleep inside the key scanner or an ISR.
- * The native 10 ms scheduler makes this a nominal delay, not a wire timestamp.
+ * cannot build/submit the next packet until the deadline. No initial wait,
+ * timer reprogramming or sleep inside the key scanner/ISR. OS sleeps cover
+ * the coarse part; the interpolated native clock supplies 1 ms settings.
  */
 void ch_host_after_send(unsigned int port, unsigned int length)
 {
@@ -112,8 +142,7 @@ void ch_host_after_send(unsigned int port, unsigned int length)
     if (port != 1 || !ends_sysex(native_usb_buffer(port), length))
         return;
     ms = current_setting();
-    if (ms)
-        native_task_delay((int)(ms / CH_GAP_STEP_MS));
+    wait_gap(ms);
 }
 
 /* Native mode 1 erases six sectors, then writes config + "usrdata\0".
@@ -170,6 +199,7 @@ void ch_config_write(const void *data, unsigned int offset, unsigned int length)
     }
     if (offset != CH_GAP_OFFSET || length != CH_GAP_BYTES ||
         native_user_flash != CH_USER_FLASH || !(native_vm_flags & 1) ||
+        ((const unsigned char *)data)[5] != CH_GAP_STEP_MS ||
         (value = ch_gap_decode(data)) < 0)
         return;
     ch_gap_encode(record, (unsigned int)value);

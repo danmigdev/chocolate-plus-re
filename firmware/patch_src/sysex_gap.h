@@ -3,7 +3,7 @@
 
 /* One setting for every HOST bank/switch. No per-bank overrides. */
 #define CH_GAP_DEFAULT_MS 20u
-#define CH_GAP_STEP_MS 10u
+#define CH_GAP_STEP_MS 1u
 #define CH_GAP_MAX_MS 1000u
 #define CH_GAP_BYTES 16u
 #define CH_GAP_OFFSET 0x53580000u
@@ -11,6 +11,10 @@
 #define CH_GAP_FLASH_OFFSET (CH_CONFIG_BYTES + 8u)
 #define CH_USER_FLASH 0x39000u
 #define CH_HOST_CALLBACK 0x1e119aeu
+/* Native interpolated clock: 20 units per 10 ms OS tick, 27-bit tick counter. */
+#define CH_CLOCK_UNITS_PER_MS 2u
+#define CH_CLOCK_UNITS_PER_TICK 20u
+#define CH_CLOCK_PERIOD 0xa0000000u
 
 int ch_gap_decode(const unsigned char *record);
 void ch_gap_encode(unsigned char *record, unsigned int milliseconds);

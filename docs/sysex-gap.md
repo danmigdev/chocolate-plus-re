@@ -16,27 +16,36 @@ trying this approach; they did not test this new firmware implementation.
 | Setting | Meaning |
 | --- | --- |
 | Initial / factory-reset value | 20 ms |
-| Accepted values | 0 through 1000 ms, in steps of 10 ms |
+| Accepted values | 0 through 1000 ms, in steps of 1 ms |
 | Scope | All HOST SysEx messages, across switches and banks |
 | Zero | Separate messages into transfers, without an added task delay |
 | Persistence | Device USRFLASH; independent of bank contents |
 | Editing | `tools/sysex_gap.py` over USB MIDI, after installing the candidate |
 
 The first message has no added initial wait. After submitting a packet ending
-in SysEx `F7`, the MIDI routing task waits the configured number of native
-10 ms scheduler ticks before it can submit another packet. Three messages thus
-use the same interval twice between their submissions. The task also waits
+in SysEx `F7`, the MIDI routing task waits against the native interpolated
+clock before it can submit another packet. The interval is **not rounded to
+10 ms**: 1, 5, 19, 20 and 21 ms are distinct settings. Three messages use the
+same interval twice between their submissions. The task also waits
 after the final SysEx; another queued command, including CC/PC, can therefore
 wait behind it. Continuation packets of a longer SysEx do not introduce pauses.
 The packet boundary change applies only when the native output callback is
 the HOST sender. USB device mode and Bluetooth packet builders keep their
 existing behavior.
 
-The millisecond values are **nominal scheduler delays**. Tick phase, USB
-completion and device processing affect actual timing. They are not a measured
-minimum wire interval, nor a promise of total press-to-sound latency. The
-single-footpress implementation and these timing values still require the
-hardware test below.
+The OS still sleeps in 10 ms ticks for the coarse part, but the deadline uses
+the native clock's 0.5 ms units. Only the final at-most-10-ms remainder is
+actively polled, with interrupts enabled between short clock reads. USB IRQs,
+key timers and task preemption can continue. No hardware timer or global OS
+tick frequency is reprogrammed.
+
+An extra 0.5 ms clock unit covers initial-sample quantization, so the clock
+model does not return before the requested duration. The tests allow less than
+0.5 ms plus polling overhead above that duration without scheduling delays.
+Actual USB timing and total press-to-sound latency are still **unmeasured on
+hardware**; preemption, configuration reads, transfer completion and TANK
+processing can add latency. A 1 ms setting step is not a claim of 1 ms wire
+accuracy under every load.
 
 ## Build locally
 
@@ -53,9 +62,13 @@ bash firmware/patch_src/build_sysex_gap.sh
 ```
 
 This runs the actual freestanding C with address/undefined-behavior sanitizers,
-then compiles its PI32v2 module and hooks. The tests cover 79,529 boundary/record
-cases plus configuration preservation, NOR programming rules, defaults, reset,
-uninitialized VM, forwarding of ordinary configuration access and zero delay.
+then compiles its PI32v2 module and hooks. The tests cover 205,841
+boundary/record/deadline cases plus configuration preservation, NOR programming
+rules, defaults, reset, uninitialized VM and ordinary configuration access.
+Every integer setting is checked across multiple initial clock/OS tick phases
+and the native clock wrap. Consecutive settings must give distinct waits;
+zero, preemption, late wake-ups, bounded final polling and older saved records
+are also tested.
 
 In PowerShell, from the repository:
 
@@ -75,11 +88,11 @@ plan must first be reconstructed from a fresh physical backup.
 Keep the Plus in U, connected through USB-C, with other MIDI editors closed.
 The command identifies `FootCtrlPlus_150-gap` and checks both the application
 and extension against the supplied build manifest before accessing the new
-setting endpoint. It refuses 012, 013 and 142.
+setting endpoint. It refuses 012, 013, 142 and the earlier 10-ms build manifest.
 
 ```powershell
 python tools/sysex_gap.py --build firmware/out/gap-150-candidate/manifest.json get
-python tools/sysex_gap.py --build firmware/out/gap-150-candidate/manifest.json set 30 --backup artifacts/sysex-gap/set-30
+python tools/sysex_gap.py --build firmware/out/gap-150-candidate/manifest.json set 21 --backup artifacts/sysex-gap/set-21
 ```
 
 `set` saves local copies of the previous setting, full native configuration and
@@ -107,6 +120,8 @@ RAM is allocated, no VM record ID is claimed, and no native code cave is reused.
 | `0x1e1506e`, `0x1e15090` | Native VM mutex lock/unlock, shared by setting reads, changes and full-save preservation |
 | `0x1a25d` bit 0 | Native VM initialization flag; do not use its mutex before initialization |
 | `0x1e0cd9c`, `0x1e0cd8e` | Native flash read/write, with its separate flash lock |
+| `0x201c606` | Native interpolated clock, in half-millisecond units |
+| `0x201c54c`, `0x201c576` | Native IRQ nesting wrappers around one clock sample only |
 
 The builder's SysEx staging path includes CIN 5/6/7 end events: `0x1e0fffe`
 routes those to staging, sets the flush flag, and copies the completed chunk
@@ -124,18 +139,37 @@ The routing task invokes the output callback at `0x1e13fe2`/`0x1e14030`; the
 key scanner does not sleep. The linked IRQ target is checked against the
 original encoded branch, including the processor's address wrap.
 
+The startup copy at `0x1e00162..0x1e0017c` places 5,604 bytes from flash
+`0x1e24aa4` into RAM `0x1bd60`. In that image, clock routine `0x1c606..0x1c65c`
+combines the OS tick counter at `0x11298` (masked to 27 bits) with the hardware
+tick counter/period registers at `0x10f0f0`/`0x10f0f4`. It uses 20 units per
+10 ms OS tick, with cached monotonic correction at `0x19310`. Native getter
+`0x1c65e` calls it and shifts right by one to obtain milliseconds. The existing
+user-timer scheduler already uses these routines.
+
+The extension calls the raw half-ms routine through an assembly wrapper that
+preserves the return value and restores IRQs immediately. Its deadline is
+`2 * milliseconds + 1` half-ms units. It sleeps while more than 20 units remain,
+then polls. Elapsed time handles the native `0xa0000000`-unit wrap explicitly,
+rather than assuming a 32-bit unsigned wrap. ELF validation checks all three
+clock-wrapper call targets and register preservation. This audit establishes
+the intended units and integration, not measured timing on the pedal.
+
 Native configuration consists of 23,652 saved bytes followed by eight bytes
 `usrdata\0` inside 24 KiB USRFLASH at physical `0x39000`. The existing capture's
 remaining 916 bytes are erased. The extension puts its 16-byte record immediately
 after the marker, at physical `0x3ec6c`. It does **not** extend the native RAM
 configuration into adjacent globals.
 
-The record contains `SGAP`, schema 1, step 10, a little-endian gap and its
+The record contains `SGAP`, schema 1, step 1, a little-endian gap and its
 16-bit complement, maximum 1000, default 20, and CRC-16/XMODEM over its first
 14 bytes. Missing/invalid records use 20 ms. A new value invokes native full
 save to erase before writing, never a NOR 0-to-1 overwrite. Native mode 1
 full saves preserve a valid record; mode 2 factory reset erases it; mode 3
 tail saves do not reach it. Boot mode 0 follows the original load path.
+Saved records from the earlier step-10 candidate remain readable when their
+value is a multiple of ten. Full saves rewrite them in the step-1 format;
+the current configuration endpoint accepts only the step-1 format for writes.
 The mutex order is native VM lock followed by native flash lock; no added
 sleep is performed while those locks are held. Native reset/save concurrency
 and power-loss behavior remain hardware validation items. This follows the
@@ -168,8 +202,9 @@ nominal VM reservation boundaries grow to include the extension.
 4. Use the established TANK BLE observation with the direct HOST cable. Trigger
    two SysEx from **one** temporary bank/event and check the complete live state
    at zero and several positive gaps, then restore both device configurations.
-5. Measure actual timing where the instrumentation permits it, distinguish
-   task ticks from USB wire timing, and check consecutive presses/long SysEx.
+5. Measure actual timing where the instrumentation permits it, including
+   adjacent settings such as 20/21 ms, and check consecutive presses, long
+   SysEx, Bluetooth load and the effect of the final polling interval.
 
 The offline tests verify logic and image construction. They do not establish
 successful boot, hardware persistence or reliable delivery on the TANK.

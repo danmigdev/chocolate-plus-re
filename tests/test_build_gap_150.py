@@ -85,6 +85,8 @@ class CompiledGapTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             report = build.build(BASELINE, MODULE, Path(directory) / "candidate")
             self.assertFalse(report["device_access"])
+            self.assertEqual(report["gap_step_ms"], 1)
+            self.assertEqual(report["clock_unit_us"], 500)
             self.assertEqual(report["status"], "offline_candidate_not_hardware_validated")
             self.assertGreater(len(report["hardware_tests_pending"]), 0)
             self.assertEqual(json.loads((Path(directory) / "candidate/manifest.json").read_text()), report)

@@ -26,22 +26,28 @@ except ImportError:
     from prepare_142 import durable_write, require
 
 OFFSET, RECORD_BYTES = 0x53580000, 16
-DEFAULT_MS, STEP_MS, MAX_MS = 20, 10, 1000
+DEFAULT_MS, STEP_MS, MAX_MS = 20, 1, 1000
 RAM_BASE, APP_BASE, USR_VIEW = 0x13490, 0x1E00120, 0x1E38000
 CONFIG_BYTES, FLASH_BYTES = 23652, 0x6000
 FOOTER = CONFIG_BYTES + 8
 def encode(milliseconds):
     require(type(milliseconds) is int and 0 <= milliseconds <= MAX_MS and milliseconds % STEP_MS == 0,
-            "Intervallo SysEx: usare 0..1000 ms, in passi di 10 ms.")
+            "Intervallo SysEx: usare 0..1000 ms, in passi di 1 ms.")
     body = struct.pack("<4sBBHHHH", b"SGAP", 1, STEP_MS, milliseconds,
                        milliseconds ^ 0xFFFF, MAX_MS, DEFAULT_MS)
     return body + struct.pack("<H", binascii.crc_hqx(body, 0))
 
 
-def decode(record):
+def decode(record, *, allow_legacy=False):
     require(len(record) == RECORD_BYTES, "Incomplete global setting record")
     ms = int.from_bytes(record[6:8], "little")
-    require(record == encode(ms), "Global setting signature, version or checksum differs")
+    expected = encode(ms)
+    if allow_legacy and record[5] == 10 and ms % 10 == 0:
+        old = bytearray(expected)
+        old[5] = 10
+        old[14:] = struct.pack("<H", binascii.crc_hqx(old[:14], 0))
+        expected = bytes(old)
+    require(record == expected, "Global setting signature, version or checksum differs")
     return ms
 
 
@@ -106,6 +112,7 @@ class UsbLink:
         identity = self.exchange(0x11).split(b"\0", 1)[0].decode("ascii")
         require(identity == IDENTITY, f"Richiede {IDENTITY}; rilevato {identity}. Nessuna impostazione scritta.")
         require(manifest.get("schema") == 1 and manifest.get("identity") == IDENTITY and
+                manifest.get("gap_step_ms") == STEP_MS and
                 type(manifest.get("module_bytes")) is int and 0 < manifest["module_bytes"] <= 0x900,
                 "Unsupported candidate manifest")
         for offset, size, digest in ((APP_BASE - RAM_BASE, APP_BYTES, manifest["application_sha256"]),
@@ -147,7 +154,7 @@ def change(link, milliseconds, output):
         require(flash[:CONFIG_BYTES] == ram and flash[CONFIG_BYTES:FOOTER] == b"usrdata\0",
                 "RAM and saved configuration differ; wait for native saving to finish")
         record = flash[FOOTER:FOOTER + RECORD_BYTES]
-        require(record in (b"\xff" * RECORD_BYTES, encode(before)) and
+        require((record == b"\xff" * RECORD_BYTES or decode(record, allow_legacy=True) == before) and
                 flash[FOOTER + RECORD_BYTES:] == b"\xff" * (FLASH_BYTES - FOOTER - RECORD_BYTES),
                 "Unknown data occupies the extension footer")
         durable_write(output / "configuration-before.bin", ram)

@@ -14,7 +14,7 @@ class Device:
         self.identity = gap.IDENTITY
         self.app = b"a" * gap.APP_BYTES
         self.module = b"extension" * 12
-        self.manifest = dict(schema=1, identity=gap.IDENTITY, module_bytes=len(self.module),
+        self.manifest = dict(schema=1, identity=gap.IDENTITY, gap_step_ms=1, module_bytes=len(self.module),
                              application_sha256=codec.digest(self.app), module_sha256=codec.digest(self.module))
         self.ram = b"c" * gap.CONFIG_BYTES
         self.flash = self.ram + b"usrdata\0" + b"\xff" * (gap.FLASH_BYTES - gap.FOOTER)
@@ -69,8 +69,8 @@ class GlobalGapTests(unittest.TestCase):
         self.link.identify(self.device.manifest)
 
     def test_record_all_settings_and_corruptions(self):
-        self.assertEqual(gap.encode(20).hex(), "53474150010a1400ebffe80314001108")
-        for value in range(0, 1001, 10):
+        self.assertEqual(gap.encode(20).hex(), "5347415001011400ebffe8031400aa0c")
+        for value in range(0, 1001):
             record = gap.encode(value)
             self.assertEqual(len(record), 16)
             self.assertEqual(gap.decode(record), value)
@@ -79,7 +79,7 @@ class GlobalGapTests(unittest.TestCase):
                 changed[bit // 8] ^= 1 << (bit % 8)
                 with self.assertRaises(ValueError):
                     gap.decode(changed)
-        for value in (-10, 1, 5, 1001, 1010, 65536, True, 20.0, "20"):
+        for value in (-10, -1, 0.5, 1.5, 1001, 1010, 65536, True, 20.0, "20"):
             with self.assertRaises(ValueError):
                 gap.encode(value)
 
@@ -88,6 +88,25 @@ class GlobalGapTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "Richiede"):
             self.identify()
         self.assertEqual([c for c, _ in self.device.commands], [0x11])
+
+    def test_older_ten_ms_manifest_is_refused(self):
+        self.device.manifest["gap_step_ms"] = 10
+        with self.assertRaisesRegex(ValueError, "manifest"):
+            self.identify()
+        self.assertEqual([c for c, _ in self.device.commands], [0x11])
+
+    def test_legacy_footer_migrates_but_is_not_a_current_wire_record(self):
+        legacy = bytes.fromhex("53474150010a1e00e1ffe80314006f1f")
+        with self.assertRaises(ValueError):
+            gap.decode(legacy)
+        self.assertEqual(gap.decode(legacy, allow_legacy=True), 30)
+        self.identify()
+        self.device.value = 30
+        self.device.flash = self.device.flash[:gap.FOOTER] + legacy + self.device.flash[gap.FOOTER + 16:]
+        with tempfile.TemporaryDirectory() as directory:
+            result = gap.change(self.link, 21, Path(directory) / "run")
+        self.assertEqual(result["status"], "saved_and_read_back")
+        self.assertEqual(self.link.get(), 21)
 
     def test_changed_application_or_extension_prevents_setting_access(self):
         for attribute in ("app", "module"):
@@ -114,14 +133,14 @@ class GlobalGapTests(unittest.TestCase):
         self.identify()
         with tempfile.TemporaryDirectory() as directory:
             output = Path(directory) / "run"
-            result = gap.change(self.link, 30, output)
+            result = gap.change(self.link, 21, output)
             self.assertEqual(result["status"], "saved_and_read_back")
             self.assertEqual(result["scope"], "global")
             self.assertTrue(result["configuration_unchanged"])
             self.assertEqual(self.link.writes, 1)
             self.assertEqual((output / "configuration-before.bin").read_bytes(), self.device.ram)
             self.assertEqual(gap.decode((output / "setting-before.bin").read_bytes()), 20)
-            self.assertEqual(self.link.get(), 30)
+            self.assertEqual(self.link.get(), 21)
 
     def test_unchanged_value_does_not_wear_flash(self):
         self.identify()

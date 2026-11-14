@@ -36,7 +36,8 @@ HOOKS = {
 }
 BINDINGS = dict(native_output_callback=0x194A0, native_user_flash=0x19100, native_vm_flags=0x1A25D,
                 native_usb_buffer=0x1E11932, native_task_delay=0x2117D78,
-                native_irq_enable=0x201C576, native_settings_lock=0x1E1506E,
+                native_irq_enable=0x201C576, native_irq_disable=0x201C54C,
+                native_clock_raw=0x201C606, native_settings_lock=0x1E1506E,
                 native_settings_unlock=0x1E15090, native_flash_read=0x1E0CD9C,
                 native_flash_write=0x1E0CD8E, native_config_read=0x1E13B50,
                 native_config_write=0x1E13B5C, native_save_continue=0x1E125D6,
@@ -112,12 +113,21 @@ def read_module(directory):
             branch(blob[pos + 2:pos + 6], symbols["ch_after_send_glue"] + 2, "call") ==
             branch(HOOKS["after_send"][1], HOOKS["after_send"][0], "call"),
             "After-send glue must restore native IRQs before entering C")
+    clock = symbols["ch_clock_half_ms"]
+    pos = clock - PATCH_ADDRESS
+    require(blob[pos:pos + 2] == bytes.fromhex("7404") and
+            blob[pos + 10:pos + 12] == bytes.fromhex("0416") and
+            blob[pos + 16:pos + 20] == bytes.fromhex("40165404"),
+            "Clock glue must preserve its return value and caller registers")
+    for offset, name in ((2, "native_irq_disable"), (6, "native_clock_raw"), (12, "native_irq_enable")):
+        require(branch(blob[pos + offset:pos + offset + 4], clock + offset, "call") ==
+                BINDINGS[name] & 0x1FFFFFF, f"Clock glue call differs: {name}")
     sources = {name: sha((SOURCE_DIR / name).read_bytes()) for name in SOURCES}
     require(json.loads((directory / "sources.json").read_text()) == sources,
             "Sources changed since compilation; rebuild the module")
     return blob, hooks, dict(elf_sha256=sha(elf), module_sha256=sha(blob),
                              module_bytes=len(blob), sources=sources,
-                             symbols={n: hex(symbols[n]) for n in (*BINDINGS, "native_save",
+                             symbols={n: hex(symbols[n]) for n in (*BINDINGS, "native_save", "ch_clock_half_ms",
                                       *(v[2] for v in HOOKS.values()))})
 
 
@@ -208,7 +218,8 @@ def build(baseline, module, output):
     report.update(schema=1, identity=IDENTITY, status="offline_candidate_not_hardware_validated",
                   baseline="exact upstream 142", image_bytes=len(raw), image_sha256=sha(raw),
                   application_sha256=sha(plain[APP_OFFSET:APP_OFFSET + APP_BYTES]),
-                  default_gap_ms=20, gap_step_ms=10, max_gap_ms=1000,
+                  default_gap_ms=20, gap_step_ms=1, max_gap_ms=1000,
+                  clock_unit_us=500, clock_quantization_guard_units=1,
                   vm=vm_geometry(0x27600, 0xFA00), device_access=False,
                   hardware_tests_pending=["boot and USB/BLE enumeration", "native save/reset concurrency",
                                           "persistent setting after U/H and power cycle",
