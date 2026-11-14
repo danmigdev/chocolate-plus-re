@@ -1,14 +1,16 @@
 #!/usr/bin/env python3
 """Measure a physical Plus HOST -> TANK test, with separate USB readback.
 
-The user moves the cable, keeps the TANK powered and presses C. The PC stages
-only the baseline; target FX OFF / REV Mix 73 is emitted by the Plus. C has
-identical A/B banks, so bank-toggle startup state cannot alter the test.
+The user moves the cable, keeps the TANK powered and presses the named keys.
+The default uses paired SysEx on C. The split variant uses one SysEx on C
+and the stock FX toggle CC on D, with an automatic USB calibration first.
+The TANK baseline is reinstated before HOST. Each key has identical A/B banks.
 """
 from __future__ import annotations
 import argparse
 import json
 from pathlib import Path
+import time
 
 try:
     from . import tank_relay_142 as relay
@@ -20,11 +22,14 @@ except ImportError:
 usb, require, digest = relay.plus, relay.require, relay.codec.digest
 
 
-def images(original, live):
+def images(original, live, variant="pair"):
+    require(variant in ("pair", "split"), "Unknown HOST test variant.")
     require(len(original) == usb.CONFIG_BYTES and len(live) == relay.LIVE_SIZE
             and original[0] == 3 and original[23639:23641] == bytes(2)
             and original[relay.C_OFFSET:relay.C_OFFSET + 417] == bytes(417), "Expected unused C on page 1 only.")
-    frames = relay.live_frame(8, b"\0") + relay.live_frame(70, b"\x49\0")
+    frames = relay.live_frame(70, b"\x49\0")
+    if variant == "pair":
+        frames = relay.live_frame(8, b"\0") + frames
     c = bytearray(417)
     c[0] = 1
     for bank in range(2):
@@ -33,6 +38,15 @@ def images(original, live):
         c[area] = len(frames)
         c[area + 1:area + 1 + len(frames)] = frames
     config = original[:relay.C_OFFSET] + bytes(c) + original[relay.C_OFFSET + 417:]
+    if variant == "split":
+        offset = relay.C_OFFSET + 417
+        require(original[offset:offset + 417] == bytes(417), "Split test requires unused D.")
+        d = bytearray(417)
+        d[0] = 1
+        for bank in range(2):
+            row = 1 + bank * 80
+            d[row:row + 5] = b"\1\0\1\0\0"  # Enabled, channel 1, CC 0, value 0.
+        config = config[:offset] + bytes(d) + config[offset + 417:]
     staged = bytearray(live)
     staged[0:2] = bytes(2)  # Mute during the test, restore original level afterwards.
     staged[8] = 1
@@ -45,13 +59,15 @@ def images(original, live):
 
 def load(folder):
     manifest = json.loads((folder / "plan.json").read_text(encoding="utf-8"))
-    require(manifest["version"] == 1, "Unknown HOST test plan.")
+    require(manifest["version"] in (1, 2), "Unknown HOST test plan.")
+    variant = manifest.get("variant", "pair")
+    require(manifest["version"] == 2 or variant == "pair", "Version 1 supports only the original pair test.")
     names = ("plus-original", "plus-saved", "plus-flips", "tank-state", "tank-live", "tank-ram", "tank-flash",
              "plus-staged", "tank-staged", "tank-target")
     blobs = {name: (folder / f"{name}.bin").read_bytes() for name in names}
     for name, data in blobs.items():
         require(digest(data) == manifest["sha256"][name], "HOST backup hash mismatch.")
-    config, staged, target = images(blobs["plus-original"], blobs["tank-live"])
+    config, staged, target = images(blobs["plus-original"], blobs["tank-live"], variant)
     require((config, staged, target) == (blobs["plus-staged"], blobs["tank-staged"], blobs["tank-target"]),
             "HOST test differs from the independently reconstructed targets.")
     require(len(blobs["plus-saved"]) == usb.FLASH_BYTES and len(blobs["plus-flips"]) == 4
@@ -69,8 +85,8 @@ def tank_scope(tank, blobs):
         tank.allowed.update((relay.live_frame(8 + block, b"\0"), relay.live_frame(area, original[area:area + 12])))
     tank.allowed.update((relay.live_frame(0, bytes(2)), relay.live_frame(8, b"\1"),
                          relay.live_frame(12, b"\0"), relay.live_frame(70, b"\x2f\0")))
-    # The PC never sends the target Mix 73. It only stages 47 and can restore
-    # the original. If original was already 73, the staged 47 still differs.
+    # After calibration the PC can only stage 47 and restore the original.
+    # If original was already 73, the staged 47 still differs.
 
 
 def snapshot(blobs, live):
@@ -88,9 +104,64 @@ def restore_plus(link, blobs):
                                         "saved-original": blobs["plus-saved"], "flips-original": blobs["plus-flips"]})
 
 
-def prepare(midi, folder):
+def stage_tank(tank, blobs):
+    for offset, data in ((0, bytes(2)), (8, b"\1"), (12, b"\0"), (70, b"\x2f\0")):
+        tank.write(offset, data)
+    require(tank.stable() == blobs["tank-staged"]
+            and tank.snapshot() == snapshot(blobs, blobs["tank-staged"]), "TANK staging mismatch.")
+
+
+def calibrate_split(link, tank, blobs, checks, record_check):
+    """Capture actual C/D output, relay it, verify each effect, then reinstate baseline."""
+    sysex = relay.live_frame(70, b"\x49\0")
+    cc = b"\xb0\0\0"
+    tank.allowed.update((sysex, cc))
+    wanted = bytearray(blobs["tank-staged"])
+    for switch, expected in ((2, [sysex]), (3, [cc])):
+        before_key = tank.stable()
+        require(before_key == wanted, "TANK changed before the next calibrated key event.")
+        require(link.read(usb.KEYS, 8) == bytes(8), "Key scanner is busy before USB calibration.")
+        link.collect(0.03)
+        link.write(usb.KEYS + 2 * switch, b"\0\x64")
+        actual = link.collect()
+        check = dict(switch="CD"[switch - 2], actual_frames=[f.hex(" ") for f in actual],
+                     expected_frames=[f.hex(" ") for f in expected], before_key=before_key.hex(), passed=False)
+        checks.append(check)
+        record_check()
+        require(actual == expected, "C/D emitted unexpected USB MIDI; nothing relayed.")
+        # Keep the standard-MIDI control separate from the preceding SysEx
+        # traffic, matching the deliberate spacing used in the physical test.
+        check["quiet_before_transmit_seconds"] = 2.0 if switch == 3 else 0
+        time.sleep(check["quiet_before_transmit_seconds"])
+        before_relay = tank.stable()
+        check["before_relay"] = before_relay.hex()
+        record_check()
+        require(before_relay == before_key, "TANK changed before the PC relay; possible second MIDI path.")
+        for frame in actual:
+            tank.transmit(frame)
+            if frame[0] == 0xF0:
+                require(tank.wait(0) == b"\0", "TANK did not acknowledge calibrated SysEx.")
+        if switch == 2:
+            wanted[70] = 73
+        else:
+            wanted[8] = 0
+        # A short-message CC has no acknowledgement; allow time before reading.
+        check["initial_settle_seconds"] = 1.0 if switch == 3 else 0.08
+        observed = tank.stable(check["initial_settle_seconds"])
+        check.update(expected_live=bytes(wanted).hex(), observed_live=observed.hex(), passed=observed == wanted)
+        record_check()
+        require(check["passed"], "USB calibration did not produce the expected TANK patch.")
+    tank_scope(tank, blobs)  # Remove temporary target permissions before staging for HOST.
+    stage_tank(tank, blobs)
+    link.write(usb.FLIPS, blobs["plus-flips"])
+    link.write(usb.RAM_BASE + 23640, blobs["plus-staged"][23640:])
+    require(link.read(usb.KEYS, 8) == bytes(8), "Key scanner did not return to idle.")
+    return checks
+
+
+def prepare(midi, folder, variant="pair"):
     folder.mkdir(parents=True, exist_ok=False)
-    report = dict(status="preflight", firmware_writes=0, tank_restored=False, plus_restored=False)
+    report = dict(status="preflight", variant=variant, firmware_writes=0, tank_restored=False, plus_restored=False)
     path = folder / "prepare.json"
     retention.record(path, report)
     with relay.Tank(midi) as tank, usb.UsbLink(midi) as link:
@@ -101,25 +172,35 @@ def prepare(midi, folder):
                 and original == flash[:usb.CONFIG_BYTES] and original == link.read(usb.RAM_BASE, usb.CONFIG_BYTES)
                 and flash == link.read(usb.USR_VIEW, usb.FLASH_BYTES) and link.read(usb.KEYS, 8) == bytes(8),
                 "Unstable, unsaved or busy baseline.")
-        config, staged, target = images(original, before["live"])
+        config, staged, target = images(original, before["live"], variant)
         blobs = {"plus-original": original, "plus-saved": flash, "plus-flips": flips,
                  **{f"tank-{k}": v for k, v in before.items()},
                  "plus-staged": config, "tank-staged": staged, "tank-target": target}
         for name, data in blobs.items():
             usb.durable_write(folder / f"{name}.bin", data)
-        plan = dict(version=1, created_utc=retention.stamp(), sha256={name: digest(data) for name, data in blobs.items()})
+        plan = dict(version=2, variant=variant, created_utc=retention.stamp(), sha256={name: digest(data) for name, data in blobs.items()})
         usb.durable_write(folder / "plan.json", (json.dumps(plan, indent=2) + "\n").encode())
         load(folder)
         tank_scope(tank, blobs)
-        link.allow = ((usb.RAM_BASE + relay.C_OFFSET, config[relay.C_OFFSET:relay.C_OFFSET + 417]),)
+        offsets = [relay.C_OFFSET] + ([relay.C_OFFSET + 417] if variant == "split" else [])
+        config_writes = [(usb.RAM_BASE + offset, config[offset:offset + 417]) for offset in offsets]
+        allowed = list(config_writes)
+        if variant == "split":
+            allowed += [(usb.KEYS + 2 * switch, b"\0\x64") for switch in (2, 3)]
+            allowed += [(usb.FLIPS, flips), (usb.RAM_BASE + 23640, config[23640:])]
+        link.allow = tuple(allowed)
         try:
             report["status"] = "staging_usb_control_and_C"
             retention.record(path, report)
-            for offset, data in ((0, bytes(2)), (8, b"\1"), (12, b"\0"), (70, b"\x2f\0")):
-                tank.write(offset, data)
-            require(tank.stable() == staged and tank.snapshot() == snapshot(blobs, staged), "TANK staging mismatch.")
-            link.write(*link.allow[0])
-            require(link.read(usb.RAM_BASE, usb.CONFIG_BYTES) == config, "C staging differs from expected configuration.")
+            stage_tank(tank, blobs)
+            for address, data in config_writes:
+                link.write(address, data)
+            if variant == "split":
+                report["USB_calibration"] = []
+                calibrate_split(link, tank, blobs, report["USB_calibration"], lambda: retention.record(path, report))
+                report["tank_baseline_reinstated_after_calibration"] = True
+                retention.record(path, report)
+            require(link.read(usb.RAM_BASE, usb.CONFIG_BYTES) == config, "Staging differs from expected configuration.")
             report["save"] = usb.wait_saved(link, config + flash[usb.CONFIG_BYTES:])
             report.update(status="prepared_for_USB_reconnect_control", saved_utc=retention.stamp())
             retention.record(path, report)
@@ -161,6 +242,9 @@ def measure_tank(midi, folder, output, control=False):
                           saved_ram_unchanged=first["ram"] == blobs["tank-ram"],
                           saved_flash_unchanged=first["flash"] == blobs["tank-flash"],
                           preset_state_unchanged=first["state"] == blobs["tank-state"])
+            if not control:
+                report["target_effects"] = dict(FX_OFF=first["live"][8] == 0,
+                                               REV_mix_73=first["live"][70:72] == b"\x49\0")
             report["status"] = "measured"
             retention.record(path, report)
         finally:
@@ -244,10 +328,11 @@ def main():
     parser.add_argument("operation", choices=("prepare", "check-usb", "read-tank", "finish", "restore"))
     parser.add_argument("--session", type=Path, required=True)
     parser.add_argument("--output", type=Path)
+    parser.add_argument("--variant", choices=("pair", "split"), default="pair", help="Preparation only; split calibrates single SysEx C and stock CC D.")
     parser.add_argument("--execute", action="store_true")
     args = parser.parse_args()
     if not args.execute:
-        print(json.dumps(dict(hardware_access=False, operation=args.operation, host_target="FX OFF + REV Mix 73",
+        print(json.dumps(dict(hardware_access=False, operation=args.operation, variant=args.variant, host_target="FX OFF + REV Mix 73",
                               requires_physical_cable_move_and_C_press=True)))
         return
     if args.operation == "prepare":
@@ -256,7 +341,7 @@ def main():
         require(args.output is not None and not args.output.exists(), "A new evidence output folder is required.")
     import mido
     if args.operation == "prepare":
-        prepare(mido, args.session)
+        prepare(mido, args.session, args.variant)
     elif args.operation in ("check-usb", "read-tank"):
         result = measure_tank(mido, args.session, args.output, args.operation == "check-usb")
         require(result["passed"], "TANK readback differs; inspect the report before another physical step.")

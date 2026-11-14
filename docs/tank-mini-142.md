@@ -376,3 +376,36 @@ failure concerns physical event handling, HOST connection, SysEx transmission
 or consecutive-message handling. A current-firmware standard MIDI control and
 a single-SysEx HOST test would distinguish those possibilities; the earlier
 PC relay test cannot substitute for them.
+
+### Single SysEx and standard MIDI comparison
+
+`host_142.py prepare --variant split` uses two unused switches: C sends one
+complete SysEx setting REV Mix to 73, and D sends channel-1 CC 0/value 0,
+the stock FX toggle. Both banks of each switch are identical. Preparation
+captures each actual Plus USB emission, forwards it to the TANK, and checks
+the entire live patch. It then reinstates and verifies the HOST baseline
+(muted, FX ON, REV disabled, Mix 47), removing the target-message permissions
+from the PC transport. Later commands reconstruct the variant from its
+immutable plan. Version-1 paired-SysEx session backups remain supported.
+
+Calibration also reads the TANK before the native key event and before the
+PC relay. A change between those reads stops preparation and restores both
+devices: a second MIDI path could otherwise toggle FX twice and hide a
+successful delivery. Captured frames and intermediate readbacks are saved
+before assertions, including failed checks. Unexpected output is never
+forwarded. Saved TANK presets and firmware remain read-only.
+
+On 14 November 2026, the split preparation exposed exactly this ambiguity.
+The single SysEx changed Mix 47 to 73 through the explicit PC relay, with an
+exact full-patch match. After the D key event, FX changed from ON to OFF
+**before the PC forwarded any CC** (`split-session-5/prepare.json`). The tool
+stopped without forwarding the CC and restored the complete original TANK
+snapshot and Plus configuration/saved region. Earlier preparations had
+forwarded the CC again and observed FX ON; their delayed-read experiments
+did not establish a timing fix. Direct PC CC controls succeeded with the
+Plus MIDI ports both closed and open (`cc-routing-1/report.json`).
+
+These observations require identifying and isolating the extra route before
+using the split workflow as a HOST test. They are not a new direct-HOST
+result or proof that the physical C/D contacts were exercised. The native
+key events used for USB calibration bypass physical contact/debounce.

@@ -91,6 +91,11 @@ class Tank:
         self.stack.close()
 
     def transmit(self, frame):
+        if frame[:1] != b"\xf0":
+            require(frame == b"\xb0\0\0" and frame in self.allowed,
+                    "Only the explicitly allowed TANK FX toggle CC is supported.")
+            self.outgoing.send(self.midi.Message.from_bytes(list(frame)))
+            return
         command, body = codec.reply(frame[1:-1])
         if command == 0x22:
             decode_write(frame)

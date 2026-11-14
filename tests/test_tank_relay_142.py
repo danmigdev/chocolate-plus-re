@@ -27,12 +27,17 @@ def config():
 
 class Controller(FakeLink):
     def write(self, address, data):
-        if relay.plus.KEYS <= address < relay.plus.KEYS + 6 and data == b"\0\x64":
+        if relay.plus.KEYS <= address < relay.plus.KEYS + 8 and data == b"\0\x64":
             assert (address, data) in self.allow
             switch = (address - relay.plus.KEYS) // 2
             bank = 1 - self.flips[switch]
             self.flips[switch] ^= 1
-            self.observed.extend(relay.plus.expected_frames(bytes(self.memory), switch, bank))
+            if switch == 3:
+                offset = 93 + 3 * 417 + 1 + 80 * bank
+                assert self.memory[offset:offset + 80] == b"\1\0\1\0\0" + bytes(75)
+                self.observed.append(b"\xb0\0\0")
+            else:
+                self.observed.extend(relay.plus.expected_frames(bytes(self.memory), switch, bank))
             self.memory[23646] = switch
             if self.failure == "bad_frame":
                 self.observed = [b"\xb0\0\1"]
@@ -59,11 +64,14 @@ class Device:
     def write(self, offset, data): self.transmit(relay.live_frame(offset, data))
     def transmit(self, frame):
         assert frame in self.allowed
-        address, data = relay.decode_write(frame)
-        if address == relay.TANK_STATE + 1:
-            self.memory[:] = self.saved
+        if frame == b"\xb0\0\0":
+            self.memory[8] = 1 - self.memory[8]
         else:
-            self.memory[address - relay.LIVE:address - relay.LIVE + len(data)] = data
+            address, data = relay.decode_write(frame)
+            if address == relay.TANK_STATE + 1:
+                self.memory[:] = self.saved
+            else:
+                self.memory[address - relay.LIVE:address - relay.LIVE + len(data)] = data
         self.sent.append(frame)
         if self.failure == "lost_ack":
             self.failure = None
