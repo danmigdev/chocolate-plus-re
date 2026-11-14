@@ -846,3 +846,11 @@ USB parsing stage causes the combined-transfer failure. The existing 013
 pacing source already attempted boundary splitting and a delay, but its
 unsuccessful hardware test is not evidence that the same change works on 142;
 any new candidate still needs validation on the current reproducible setup.
+
+### Configurable interval follow-up
+
+The selected design uses one global interval for all switches and banks,
+initially 20 ms. The [experimental 150 extension](sysex-gap.md) implements
+HOST message splitting, a persistent setting and a Windows configuration
+command. It has been compiled and tested offline; it has not been installed
+or validated on the devices. Exact upstream 142 remains the hardware baseline.

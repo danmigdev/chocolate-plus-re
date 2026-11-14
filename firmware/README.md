@@ -2,6 +2,11 @@
 
 Everything needed to rebuild the custom firmware from the stock image.
 
+The default build below still reproduces upstream 142. A separate
+[experimental global SysEx gap extension](../docs/sysex-gap.md) builds a 150
+candidate with one persistent interval for all HOST banks (20 ms initially).
+It is compiled and tested offline, but not yet installed or hardware validated.
+
 ```
 build.py          patches the original firmware 012 (checked by SHA-256) and writes FootCtrlPlus_142-dtnprt.fwsc
 fwsctool.py       .fwsc/.ufw container, LFSR member cipher, CRC16 (imported by build.py)
