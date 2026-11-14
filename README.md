@@ -2,6 +2,11 @@
 
 Modded Firmware for the M-VAVE Chocolate Plus MIDI Controller.
 
+This fork uses the exact upstream **142** as its baseline for the Chocolate Plus
+and TANK Mini investigation. See [migration and evidence](docs/tank-mini-142.md)
+for the Windows USB backup/install tools, verification and current limitations.
+Local firmware builds, configurations and device backups are excluded from Git.
+
 ```
 firmware/     custom firmware build (build.py, patch sources, CHANGELOG.md, README.md)
 ```

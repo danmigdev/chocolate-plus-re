@@ -18,3 +18,8 @@ firmware/patch_src/*.elf
 
 # Claude Code local settings
 .claude/settings.local.json
+
+# Local hardware evidence, user configurations and extracted vendor components.
+artifacts/
+*.bin
+*.fcp
