@@ -180,3 +180,88 @@ matched the original backup byte for byte. Journal publication now handles
 transient Windows sharing violations; tests cover both transient and permanent
 failures, including a real held file handle on Windows. This successful restore
 does not establish recovery into ROM after power loss with an invalid app.
+
+## Automatic USB acceptance
+
+The scripts below need `mido` and `python-rtmidi`. They open only the expected
+MIDI port pairs. Each output folder must be new; private backups and reports
+remain in ignored `artifacts/`. Omit `--execute` for an offline description.
+
+```powershell
+python tools/acceptance_142.py --output artifacts/acceptance-142/usb-run --execute
+python tools/tank_relay_142.py --output artifacts/acceptance-142/tank-run --execute
+```
+
+`acceptance_142.py` requires the exact pinned 142 application, advanced mode,
+one active page, the existing A/B SysEx assignments, and unused SysEx storage
+in C/D and disabled pages. It backs up the native 23,652-byte configuration
+(including six bytes outside the public editor view), the complete 24-KiB
+saved region, and the advanced-mode bank toggles. Its exact write allow-list
+permits only the frozen test data, restoration data, and native key events.
+
+The key events write `[counter=0, pending-state=100]` to the existing scanner
+at `0x1958e + 2*switch`. The pinned 142 tap fix processes these through its
+normal press/release path with the physical switches released. No code,
+callback, save counter, firmware or bootloader is modified. This checks bank
+selection and actual USB MIDI emission; it bypasses physical contacts and
+does not measure physical switch latency. Advanced bank state is at
+`0x193cb + switch`: the next value 1 selects B, and 0 selects A.
+
+After checking both banks of A/B, the script writes FF, AA55, then FF into
+7,620 unused SysEx payload bytes. Zero length bytes, command rows and active
+assignments remain intact. Each round must match the complete RAM image,
+two complete mapped saved-region reads, and an expired native save timer.
+The final restoration must satisfy those same checks. An exception attempts
+restoration before exiting; a lost write acknowledgement never causes an
+automatic retry of that write.
+
+On 14 November 2026, `usb-automatic-3/report.json` recorded four successful
+native taps and five byte-identical SysEx frames. All three saved-memory
+rounds passed, taking 5.828, 5.812 and 5.860 seconds respectively, including
+readback time. The final configuration and saved region matched their
+original backups exactly. This establishes successful rewriting in U mode;
+it does not establish persistence through a new H start or a power cycle
+with the test patterns. The two earlier local runs stopped because of test
+harness preconditions/expectations, which were corrected before this run;
+they are not evidence of firmware corruption.
+
+`tank_relay_142.py` requires a TANK reporting `TANK MINI_009` and a Plus in U,
+each connected separately to the PC. It backs up the TANK's live patch,
+state and saved presets in both RAM and flash. It captures real output from
+native Plus key events, checks it byte for byte, then forwards those captured
+frames unchanged to the TANK. The TANK's full 92-byte live patch is read back
+after each bank: the complete expected image must match, including all
+unrelated bytes. A setup value different from the target prevents a no-op from
+passing. The existing A/B assignments cover MOD ON/OFF, the two-message FX
+ON plus REV Mix bank, and preset reload. An unused C is temporarily assigned
+REV Mix 25/75; these parameter tests run with REV disabled. All baseline
+state is restored, including unsaved TANK edits and the original empty C.
+Saved TANK presets are never written and must compare equal afterwards.
+
+This relay uses PC USB output and buffered forwarding. It does not reproduce
+the Plus HOST sender or its timing, and memory readback does not establish
+the audible effect. Neither script can certify the direct Plus HOST-to-TANK
+connection. A passing simulation or USB relay test must not be reported as
+that hardware result.
+
+On the same date, `tank-relay-3/report.json` recorded **six passing live relay
+cases and seven intact SysEx frames**. A selected MOD OFF and ON. B reloaded
+the saved preset and sent FX ON plus REV Mix **10**, which is the raw value
+actually encoded in the existing assignment. Temporary C selected raw Mix
+75 and 25 in that order. Each full live-patch readback matched its expected
+image. The TANK's complete live patch, four-byte state, and saved presets in
+RAM and flash were restored byte for byte. The Plus's complete RAM
+configuration, 24-KiB saved region, key scanner and bank toggles were also
+restored and checked; C remained empty afterwards. The starting Plus
+configuration and saved region still matched the earlier USB acceptance
+backup. All **55 automated software tests** passed, including interrupted
+transmission and restoration checks.
+
+Before the simultaneous relay was possible, a separate replay of the five
+previously captured 142 SysEx frames passed all four A/B cases on the TANK
+and restored its full snapshot. That earlier result is explicitly labelled
+capture replay in its local report; the six-case result above used live Plus
+emissions. Windows initially failed to enumerate one of the devices. Hub and
+port resets did not resolve it; replacing the second USB cable allowed both
+devices to be recognised together. The first two relay runs stopped at
+preflight without configuration writes because the Plus was not enumerated.
