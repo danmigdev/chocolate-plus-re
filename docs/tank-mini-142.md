@@ -322,8 +322,9 @@ press C once. Keep the TANK powered while returning its USB cable to the PC.
 `read-tank` captures its full state before restoring the original live patch
 and checking saved-preset integrity. Return the Plus to U; `finish` captures
 its stored configuration and restores the original configuration, including
-empty C. The native last-switch field changing to C is recorded separately
-from corruption. Physical cable routing and the C press are user observations;
+empty C. The native current-switch marker is recorded separately from stored
+configuration integrity; its value after reboot cannot confirm a physical C
+press. Physical cable routing and the C press are user observations;
 the expected parameter changes are measured by USB readback.
 
 ```powershell
@@ -343,3 +344,35 @@ device is reported and does not prevent restoring the other one. Keep the
 local backups until both restoration checks have passed. A HOST result is
 established only after the physical sequence and measured target match;
 the preparation or a simulated test alone cannot establish delivery.
+
+The first physical HOST attempt on 14 November 2026 did **not** apply the
+target changes. The USB reconnect control passed with the complete staged
+TANK snapshot preserved. With the HOST connection, H selection and one C
+press confirmed by the user, subsequent USB readback still showed FX ON and
+Mix 47, exactly the staged live patch, instead of FX OFF and Mix 73. Saved
+presets and preset state were unchanged. The complete original TANK snapshot
+was restored and later independently rechecked with reads only.
+
+After the Plus returned to U, its complete configuration and 24-KiB saved
+region matched the **prepared** images byte for byte, including both C banks.
+Thus storage corruption was not observed during this HOST attempt either.
+The original Plus configuration, saved region and runtime bank state were
+restored and verified; C is empty again. Evidence is in local
+`artifacts/host-142/usb-control-1/`, `measurement-1/` and `plus-after-H-1/`.
+
+The first version of `finish` incorrectly expected configuration byte 23646
+to persist as 2 after C. It was 1 both before and after the test. The pinned
+142 code writes this current-switch marker in RAM at `0x1e1304c`; the normal
+advanced-mode press path does not itself arm the configuration save timer.
+The configuration-write handler arms that timer at `0x1e13b76`. Consequently,
+after restart an unchanged marker is not evidence of a different switch or
+corrupted storage. The comparison now uses the actual prepared image and
+reports the marker separately. The historical raw capture and original report
+were retained; `analysis-after-H.json` records the corrected offline comparison.
+
+This attempt establishes that the expected two-message HOST action did not
+take effect under the tested conditions. It does not identify whether the
+failure concerns physical event handling, HOST connection, SysEx transmission
+or consecutive-message handling. A current-firmware standard MIDI control and
+a single-SysEx HOST test would distinguish those possibilities; the earlier
+PC relay test cannot substitute for them.

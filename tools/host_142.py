@@ -173,6 +173,23 @@ def measure_tank(midi, folder, output, control=False):
     return report
 
 
+def compare_plus_storage(blobs, ram, flash):
+    expected = blobs["plus-staged"]
+    configuration = retention.changes(expected, ram)
+    saved = retention.changes(expected + blobs["plus-saved"][usb.CONFIG_BYTES:], flash)
+    def data_intact(result):
+        return all(row["offset"] == 23646 and int(row["read"], 16) < 4 for row in result["differences"])
+    # 142 updates the display's current-switch byte in RAM at 0x1e1304c.
+    # A physical advanced-mode press does not itself arm the save counter;
+    # the protocol-write path at 0x1e13b76 does. After reboot this byte can
+    # therefore retain its staged value. It cannot prove which key was pressed.
+    return dict(configuration=configuration, saved=saved,
+                ram_matches_saved=ram == flash[:usb.CONFIG_BYTES],
+                configuration_data_intact=data_intact(configuration), saved_data_intact=data_intact(saved),
+                current_switch_marker=dict(staged=expected[23646], ram=ram[23646], saved=flash[23646],
+                                           proves_physical_C_press=False))
+
+
 def finish(midi, folder, output):
     blobs = load(folder)
     output.mkdir(parents=True, exist_ok=False)
@@ -184,11 +201,7 @@ def finish(midi, folder, output):
             ram, flash = link.read(usb.RAM_BASE, usb.CONFIG_BYTES), link.read(usb.USR_VIEW, usb.FLASH_BYTES)
             usb.durable_write(output / "configuration-after.bin", ram)
             usb.durable_write(output / "saved-after.bin", flash)
-            expected = bytearray(blobs["plus-staged"])
-            expected[23646] = 2  # Native last-switch field after physically pressing C.
-            report.update(configuration=retention.changes(expected, ram),
-                          saved=retention.changes(bytes(expected) + blobs["plus-saved"][usb.CONFIG_BYTES:], flash),
-                          ram_matches_saved=ram == flash[:usb.CONFIG_BYTES])
+            report.update(compare_plus_storage(blobs, ram, flash))
             report["status"] = "measured"
             retention.record(path, report)
         finally:

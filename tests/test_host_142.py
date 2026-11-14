@@ -37,7 +37,9 @@ class HostTests(unittest.TestCase):
             self.assertEqual(tank.stable(), tank.original)
             controller.memory[23646] = 2
             result = host.finish(None, root / "session", root / "plus")
-            self.assertEqual(result["configuration"]["changed_bytes"], 0)
+            self.assertEqual(result["configuration"]["changed_bytes"], 1)
+            self.assertTrue(result["configuration_data_intact"] and result["saved_data_intact"])
+            self.assertEqual(result["current_switch_marker"]["ram"], 2)
             self.assertTrue(result["restored"])
             self.assertEqual(bytes(controller.memory), config())
 
@@ -73,6 +75,28 @@ class HostTests(unittest.TestCase):
                 with self.assertRaisesRegex(ValueError, "TANK disconnected"):
                     host.recover(None, root / "session", root / "recovery")
             self.assertEqual(bytes(controller.memory), config())
+
+    def test_unchanged_saved_switch_marker_is_not_a_corruption_or_keypress_claim(self):
+        original = bytearray(config())
+        original[23646] = 1
+        staged, _, _ = host.images(bytes(original), Device().original)
+        flash = staged + b"usrdata\0" + bytes(host.usb.FLASH_BYTES - len(staged) - 8)
+        result = host.compare_plus_storage({"plus-staged": staged, "plus-saved": flash}, staged, flash)
+        self.assertEqual(result["configuration"]["changed_bytes"], 0)
+        self.assertEqual(result["saved"]["changed_bytes"], 0)
+        self.assertTrue(result["configuration_data_intact"] and result["saved_data_intact"])
+        self.assertEqual(result["current_switch_marker"],
+                         dict(staged=1, ram=1, saved=1, proves_physical_C_press=False))
+
+    def test_a_corrupted_C_payload_cannot_be_treated_as_a_runtime_marker_change(self):
+        staged, _, _ = host.images(config(), Device().original)
+        flash = staged + b"usrdata\0" + bytes(host.usb.FLASH_BYTES - len(staged) - 8)
+        damaged = bytearray(staged)
+        damaged[host.relay.C_OFFSET + 162] &= 0x7f  # F0 -> 70 in C bank A.
+        result = host.compare_plus_storage({"plus-staged": staged, "plus-saved": flash}, bytes(damaged), flash)
+        self.assertFalse(result["configuration_data_intact"])
+        self.assertTrue(result["saved_data_intact"])
+        self.assertFalse(result["ram_matches_saved"])
 
 
 if __name__ == "__main__":
