@@ -21,7 +21,8 @@ No TANK Mini firmware is changed by this work.
 A focused review branch, `pr/143-host-sysex-split`, starts at upstream `dev`
 (`16a405f`) and contains the standalone firmware builder, patch sources,
 build tests and firmware documentation. It produces the identical compact
-image. The pull request targets upstream `dev` after that hardware validation.
+image. [Upstream pull request #2](https://github.com/dtnprt/chocolate-plus-re/pull/2)
+targets `dev` and includes that hardware validation.
 
 ## What changes
 
