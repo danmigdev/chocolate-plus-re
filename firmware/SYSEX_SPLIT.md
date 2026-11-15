@@ -3,9 +3,8 @@
 Upstream 142 can pack multiple complete SysEx messages into one HOST USB
 transfer. In the tested Chocolate Plus -> TANK Mini setup, a bank containing
 FX OFF followed by REV Mix 73 did not change either parameter, while each
-message worked by itself. Ending the transfer after each SysEx addressed
-this behavior in an earlier prototype, including five trials without any
-added delay. This candidate retains only that boundary change.
+message worked by itself. With this candidate, ten automatic C events and one
+physical C press each applied both changes without any added delay.
 
 **143-split is a candidate build number, not an upstream release.**
 The existing `build.py` remains unchanged and reproduces the 142 baseline.
@@ -13,7 +12,7 @@ The existing `build.py` remains unchanged and reproduces the 142 baseline.
 OTA installer. The exact 143 candidate has passed offline validation and was
 installed on 15 November 2026. Two complete physical flash reads matched the
 target, and the application and module hashes matched after a cold boot with
-the original configuration preserved. HOST delivery validation is still pending.
+the original configuration preserved. The direct HOST delivery results follow.
 
 ## Patch behavior
 
@@ -52,6 +51,26 @@ The original editor layout has one 128-byte SysEx area per bank (one length
 byte plus up to 127 bytes). Multiple configured messages or command rows do
 not independently control USB transfer boundaries. The tested 142 source
 can coalesce even two different switch events queued in the same timer tick.
+
+## Hardware validation, 15 November 2026
+
+The exact application and module were read back and verified over BLE with
+Chocolate in H and the powered TANK Mini connected to its HOST port. Neither
+device had a USB cable to the PC. The native output callback was `0x1e119ae`,
+HOST port state was 1 and the Plus had no native Bluetooth client connection.
+The PC read state over two BLE configuration links; it did not relay MIDI.
+
+One C bank contained FX OFF followed by REV Mix 73. Each trial started with FX
+on and Mix 47. Ten automatic native C events and one user-confirmed physical
+C press each produced both target values, with all 92 live-patch bytes matching
+the expected result and exactly one change in the Plus C toggle. No other live
+parameter or preset selection changed during delivery.
+
+After each group, complete Plus assignments, saved configuration and toggle
+state matched their backups. TANK live state, preset state and saved RAM/flash
+bank also matched the original snapshot. No TANK firmware or saved presets were
+written. The temporary test assignments were removed. These are delivery checks
+on one setup, not USB timestamp measurements or a broad compatibility test.
 
 ## Reproduce
 
