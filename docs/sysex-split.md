@@ -7,9 +7,11 @@ The user selected 143 as this fork's build number. It is not an upstream
 release announcement. The default `firmware/build.py` still reproduces 142
 for comparison; the additional builder creates the candidate described here.
 
-The candidate has passed 129 Python tests and the C checks described below;
-it **has not yet been installed or verified on the physical controller**.
-The currently installed experimental
+The candidate has passed 129 Python tests and the C checks described below.
+On 15 November 2026 it replaced the experimental 150 on the physical controller:
+two complete physical flash reads matched the installation target, and the
+application and module hashes matched again after a cold boot. Exact 143 HOST
+delivery validation is still pending. The earlier experimental
 150 and its hardware results are recorded in
 [the previous implementation](https://github.com/danmigdev/chocolate-plus-re/blob/c9a29e9d8a462d8de3c71efe356680bc73f860e2/docs/sysex-gap.md).
 No TANK Mini firmware is changed by this work.
@@ -117,6 +119,23 @@ last. `--execute` performs the bounded plan in the already running RAM loader;
 `--restore` restores that device's complete original sector contents. Both
 use double readback and never retry uncertain writes automatically. Independent
 cold recovery from a nonbooting application has not been verified.
+
+### Recorded installation on 15 November 2026
+
+The migration used two identical 256 KiB physical backups of the installed 150.
+Seven sectors were updated, with the directory sector last; two complete final
+physical reads matched the target. After power-off and USB disconnection, the
+controller booted as `FootCtrlPlus_143-split`. The complete application and
+116-byte module matched the hashes above. RAM configuration and the complete
+saved user region matched the pre-installation backup.
+
+The Bluetooth indicator had a saved off flag despite the native radio already
+being enabled. `tools/radio_indicator_143.py` verified the exact 143 image and
+idle keys, backed up RAM and saved configuration, then changed only configuration
+byte 23651 from 1 to 0 in one bounded write. The unchanged native saver also
+retired the validated legacy 150 footer. Two complete saved-region reads matched
+the expected result. This is a configuration correction, not another firmware
+patch; it does not establish that the PC can open the Chocolate's GATT service.
 
 ## Direct HOST acceptance
 

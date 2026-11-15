@@ -334,6 +334,8 @@ def use_paired_cache(client, address, version):
 async def run(args, experiment=matrix, channel_factory=Channel):
     from bleak import BleakClient, BleakScanner
     args.output.mkdir(parents=True, exist_ok=False)
+    ready_marker = getattr(args, "plus_ready_file", None)
+    require(ready_marker is None or not ready_marker.exists(), "Use a fresh Plus power-on confirmation marker")
     report = dict(created_utc=ble.stamp(), firmware_writes=0, topology="Plus HOST -> TANK; two PC BLE configuration links",
                   physical_keypresses=False, usb_packet_capture=False, tank_restored=False, plus_restored=False,
                   peers={})
@@ -354,6 +356,12 @@ async def run(args, experiment=matrix, channel_factory=Channel):
                 channels = []
                 for is_plus, name in ((False, ble.NAME), (True, "FootCtrlPlus")):
                     save(status="waiting_for_plus_H" if is_plus else "connecting_tank_first")
+                    if is_plus and ready_marker is not None:
+                        save(plus_confirmation_file=str(ready_marker))
+                        deadline = time.monotonic() + 300
+                        while not ready_marker.exists():
+                            require(time.monotonic() < deadline, "Plus power-on confirmation timed out")
+                            await asyncio.sleep(.25)
                     cached = await paired_plus_address(args.pair_plus_from) if is_plus and args.pair_plus_from else None
                     device = cached or await BleakScanner.find_device_by_filter(lambda d, a: (a.local_name or d.name or "") == name,
                                                                               timeout=120 if is_plus else 30)
@@ -429,6 +437,8 @@ def argument_parser():
     parser.add_argument("--pair", action="store_true", help="Pair the verified TANK with Windows if needed; leave Plus pairing unchanged.")
     parser.add_argument("--pair-plus-from", type=Path, help="Previous report verifying the exact Plus identity/address; pair before GATT access.")
     parser.add_argument("--preflight-only", action="store_true")
+    parser.add_argument("--plus-ready-file", type=Path,
+                        help="After connecting TANK, wait for this fresh marker before connecting Plus; avoids using the BLE timeout for a physical power-on step.")
     parser.add_argument("--restore-from", type=Path)
     parser.add_argument("--execute", action="store_true")
     return parser
