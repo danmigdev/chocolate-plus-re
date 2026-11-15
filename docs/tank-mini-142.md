@@ -852,5 +852,7 @@ any new candidate still needs validation on the current reproducible setup.
 The selected design uses one global interval for all switches and banks,
 initially 20 ms. The [experimental 150 extension](sysex-gap.md) implements
 HOST message splitting, a persistent setting and a Windows configuration
-command. It has been compiled and tested offline; it has not been installed
-or validated on the devices. Exact upstream 142 remains the hardware baseline.
+command, with steps of 1 ms. On 15 November 2026 the pinned build was installed
+and passed the documented HOST delivery tests. Exact upstream 142 remains the
+comparison baseline and the unchanged default build; see the linked hardware
+record for 150 results and remaining validation limits.

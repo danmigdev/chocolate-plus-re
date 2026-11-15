@@ -331,7 +331,7 @@ def use_paired_cache(client, address, version):
     client._backend._device_info = int(address.replace(":", ""), 16)
 
 
-async def run(args, experiment=matrix):
+async def run(args, experiment=matrix, channel_factory=Channel):
     from bleak import BleakClient, BleakScanner
     args.output.mkdir(parents=True, exist_ok=False)
     report = dict(created_utc=ble.stamp(), firmware_writes=0, topology="Plus HOST -> TANK; two PC BLE configuration links",
@@ -374,7 +374,7 @@ async def run(args, experiment=matrix):
                         from importlib.metadata import version
                         use_paired_cache(client, cached, version("bleak"))
                     client = await stack.enter_async_context(client)
-                    channel = Channel(client, is_plus, lambda direction, data, peer=name: record(peer, direction, data))
+                    channel = channel_factory(client, is_plus, lambda direction, data, peer=name: record(peer, direction, data))
                     await client.start_notify(ble.NOTIFY, channel.notified)
                     report["peers"][name]["identity"] = await channel.identify()
                     save(peers=report["peers"])
@@ -390,7 +390,7 @@ async def run(args, experiment=matrix):
                         before = await channel.tank_snapshot()
                         require(before == await channel.tank_snapshot(), "TANK baseline is unstable.")
                 tank, plus = channels
-                save(status="verifying_complete_142_application")
+                save(status="verifying_complete_application")
                 save(app_sha256=await plus.verify_app())
                 save(native=await host_ready(plus))
                 if args.restore_from:

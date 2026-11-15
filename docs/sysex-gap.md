@@ -1,15 +1,17 @@
 # Global configurable HOST SysEx gap (experimental 150)
 
-One footswitch bank can contain two complete `F0 ... F7` messages. The proposed
+One footswitch bank can contain two complete `F0 ... F7` messages. The
 150 extension splits them into separate HOST USB transfers and uses **one global
 interval for all switches and banks**. Its initial value is **20 ms**, editable
 from a Windows PC without rebuilding or reinstalling the firmware after the
 extension has been installed. There are no per-bank overrides.
 
-This is an **offline-built experimental candidate**, not an installed or
-hardware-validated release. The tested pedal still runs exact upstream 142.
-The [142 timing experiments](tank-mini-142.md#native-host-timing-sweep) justify
-trying this approach; they did not test this new firmware implementation.
+This is an **experimental build tested on one Chocolate Plus / TANK Mini**.
+The pinned 1-ms candidate was installed and checked on 15 November 2026;
+the hardware record below separates delivery tests from timing measurement.
+The default firmware build still reproduces upstream 142. The earlier
+[142 timing experiments](tank-mini-142.md#native-host-timing-sweep) remain the
+comparison baseline. No TANK firmware was modified.
 
 ## Behavior
 
@@ -73,15 +75,68 @@ are also tested.
 In PowerShell, from the repository:
 
 ```powershell
-python tools/build_gap_150.py --baseline firmware/out/142-baseline/FootCtrlPlus_142-dtnprt.fwsc --module firmware/out/sysex-gap-150 --output firmware/out/gap-150-candidate
+python tools/build_gap_150.py --baseline firmware/out/142-baseline/FootCtrlPlus_142-dtnprt.fwsc --module firmware/out/sysex-gap-150 --output firmware/out/gap-150-1ms-candidate-1
 python -m unittest tests.test_sysex_gap tests.test_build_gap_150 -q
 ```
 
 Use a new output directory on each build. The result is a compact image,
 `FootCtrlPlus_150-gap.compact.bin`, and `manifest.json`. This command performs
-no device I/O and produces no OTA installer. **The 013-to-142 installation
-tools must not be reused with this image.** A 142-to-150 migration and rollback
-plan must first be reconstructed from a fresh physical backup.
+no device I/O and produces no OTA installer. The separate Windows procedure
+below accepts the pinned one-millisecond candidate. The 013-to-142 plan format
+does not accept this image.
+
+## Windows installation of the pinned candidate
+
+`prepare_gap_150.py` accepts only exact upstream 142 as its source and the
+162,304-byte 1-ms candidate with SHA-256
+`73e7a6013551812d2d0b1eb7d5c60d88231ff34de3b6adecb9d8659691aa7a20`.
+It requires two matching fresh physical reads from `br25_usb.py`, checks that
+the extension's new extent is erased, and reconstructs the complete target.
+The seven changed sectors are `0x10000`, `0x12000`, `0x13000`, `0x19000`,
+`0x1a000`, `0x27000`, then the directory/CRC sector `0x1000` last. Native VM,
+Bluetooth data, calibration, configuration and all bytes from `0x27a00` onward
+are preserved, including the unchanged part of the final erased sector.
+
+Keep the Plus in U with a working USB data cable, its HOST port empty and other
+MIDI editors closed. The [Windows bootloader reader](tank-mini-142.md#windows-usb-migration)
+still requires the pinned vendor RAM loader and administrator access.
+
+```powershell
+python tools/native_snapshot.py --profile 142 --output artifacts/migration-gap-150/boot-entry --enter-boot
+# After BR25 UBOOT1.00 enumeration, in an administrator process:
+python tools/br25_usb.py --loader <br25loader.bin> --output artifacts/migration-gap-150/physical-before --execute
+python tools/prepare_gap_150.py --backup artifacts/migration-gap-150/physical-before --candidate firmware/out/gap-150-1ms-candidate-1/FootCtrlPlus_150-gap.compact.bin --output artifacts/migration-gap-150/plan
+python tools/install_gap_150.py --plan artifacts/migration-gap-150/plan
+python tools/install_gap_150.py --plan artifacts/migration-gap-150/plan --restore
+# Only with the same verified RAM-loader session still running:
+python tools/install_gap_150.py --plan artifacts/migration-gap-150/plan --execute
+```
+
+The installer shares the bounded, journaled sector transport with the earlier
+142 migration, but uses a separate exact-image plan validator. It rereads the
+complete flash twice before writing, blank-checks every erase twice, verifies
+every programmed page and sector, and requires two final complete matching
+reads. It never resets the device or retries an uncertain erase/program.
+
+`--restore --execute` restores the original seven sectors while the RAM loader
+remains reachable and the rest of flash still matches the backup. This is not
+proof of recovery from a nonbooting app after power loss. Only after
+`physically_verified_restart_required`, perform a full restart in U and check:
+
+```powershell
+python tools/native_snapshot.py --profile 150 --gap-plan artifacts/migration-gap-150/plan --output artifacts/migration-gap-150/native-after
+python tools/sysex_gap.py --build firmware/out/gap-150-1ms-candidate-1/manifest.json get
+```
+
+The new native profile pins both the complete application and the 928-byte
+extension. Boot entry for 142 and this 150 is audited separately: the USB
+handler at `0x1e10298` compares the eight USB-MIDI bytes against its six-byte
+prefix, final `F7` and command `7D`, then branches at `0x1e102be` to
+`0x1e10438`. That call reaches RAM `0x1c934`; its 28 bytes are identical to the
+previously verified 013 boot routine. A fresh hash check of that relocated
+routine, the complete application, stable saved configuration and (for 150)
+the extension precedes the single boot request. The MIDI input is closed
+before sending it.
 
 ## Configure from Windows after installation
 
@@ -91,8 +146,8 @@ and extension against the supplied build manifest before accessing the new
 setting endpoint. It refuses 012, 013, 142 and the earlier 10-ms build manifest.
 
 ```powershell
-python tools/sysex_gap.py --build firmware/out/gap-150-candidate/manifest.json get
-python tools/sysex_gap.py --build firmware/out/gap-150-candidate/manifest.json set 21 --backup artifacts/sysex-gap/set-21
+python tools/sysex_gap.py --build firmware/out/gap-150-1ms-candidate-1/manifest.json get
+python tools/sysex_gap.py --build firmware/out/gap-150-1ms-candidate-1/manifest.json set 21 --backup artifacts/sysex-gap/set-21
 ```
 
 `set` saves local copies of the previous setting, full native configuration and
@@ -193,18 +248,93 @@ Boot prefix, BTIF, EXIF, USRFLASH and all existing application payload outside
 the specified hooks/identity/greeting are retained. The protected-image and
 nominal VM reservation boundaries grow to include the extension.
 
-## Remaining hardware validation
+## Hardware record, 15 November 2026
 
-1. Prepare a fresh physical 142 backup, bounded migration and verified rollback.
-2. Check candidate boot, USB enumeration, Bluetooth connections and code hashes.
-3. Change the global value, edit an ordinary bank, wait for native save, then
-   verify both after U/H changes and power cycles. Test reset on backed-up data.
-4. Use the established TANK BLE observation with the direct HOST cable. Trigger
-   two SysEx from **one** temporary bank/event and check the complete live state
-   at zero and several positive gaps, then restore both device configurations.
-5. Measure actual timing where the instrumentation permits it, including
-   adjacent settings such as 20/21 ms, and check consecutive presses, long
-   SysEx, Bluetooth load and the effect of the final polling interval.
+Two fresh physical 256-KiB backups matched. The plan changed seven application
+sectors and 106 pages. Every programmed sector passed its two readbacks. A
+Windows USB error (`WinError 31`) interrupted the subsequent complete-image
+verification; no erase or program command was retried. The still-running RAM
+loader then supplied two new complete reads, both exactly matching the target.
+The separate `physical-install-verification.json` records that successful
+verification without overwriting the original interrupted-install report.
 
-The offline tests verify logic and image construction. They do not establish
-successful boot, hardware persistence or reliable delivery on the TANK.
+After a full power cycle in U, the unit identified as `FootCtrlPlus_150-gap`.
+The complete native application and extension matched their pinned hashes;
+configuration RAM and saved USRFLASH matched the pre-installation backup.
+The setting initially read 20 ms. A USB change to 21 ms was saved and its
+complete USRFLASH read back twice, with all native configuration bytes intact.
+
+After another confirmed full power cycle, this time into H with TANK on HOST,
+the PC connected to both devices over BLE, without either device cabled to
+the PC. The setting still read 21 ms, and the complete 23,652-byte native
+configuration matched the earlier U capture exactly. Native HOST output was
+active and the Chocolate Bluetooth client had no connected peer.
+
+`tools/ble_gap_150.py` then assigned two complete messages to the same temporary
+C bank: FX OFF and REV Mix 73. Each automatic trial triggered one native C
+event, checked one toggle transition, and read the entire TANK live patch and
+preset state after delivery. The starting state was restored between trials.
+
+| Configured global interval | Both changes applied | Trigger |
+| --- | --- | --- |
+| 21 ms | 5 / 5 | One native C event |
+| 20 ms | 5 / 5 | One native C event |
+| 1 ms | 5 / 5 | One native C event |
+| 0 ms | 5 / 5 | One native C event |
+
+The global setting was changed over BLE with a single complete 16-byte record
+and verified against the saved region. Ordinary bank saves preserved it. Each
+group restored the original Chocolate assignments, key state and TANK live
+patch; TANK saved RAM/flash and preset state were verified unchanged.
+
+A final user-confirmed physical press/release of C at 20 ms also applied both
+changes. The native C toggle changed exactly once and the complete TANK live
+patch matched the target. Both devices' temporary settings were restored and
+verified again. The session completed with **150 installed, a global 20-ms
+setting, original Chocolate assignments and original TANK live/saved values**.
+The full report records 20 automatic successes and one physical success.
+
+Zero means no extra timer wait, **not zero elapsed USB time**. These results
+show successful delivery with message splitting alone in this setup; they do
+not provide transfer timestamps or a general reliability guarantee. Neither
+the Bluetooth readback nor native event ACK measures press-to-audio latency.
+
+Upstream 142 already supports storing multiple complete SysEx in one bank;
+the change is at the HOST transfer boundary. In the audited path, its packet
+builder can put those distinct MIDI messages in one USB transfer. The 150
+hook ends the transfer at the first complete SysEx and sends the next one
+separately. This is a compatibility change for the tested TANK behavior, not
+a new SysEx message format or proof that multiple SysEx in one USB transfer
+are inherently invalid.
+
+Private evidence is in `artifacts/migration-gap-150/` and
+`artifacts/gap-host-150/session-1/`. These files and firmware images are not
+committed. The offline regression suite passed 133 tests, including the bounded
+migration/rollback simulation, failure restoration and BLE write guards.
+
+## Repeat the HOST delivery test
+
+Use a fresh output directory. The PC connects to TANK first while Chocolate is
+off; then start Chocolate in H with TANK on HOST. The prior pairing report is
+evidence for the same physical Chocolate address, not proof of current code:
+both the 150 application and extension are verified again before writes.
+
+```powershell
+python tools/ble_gap_150.py --output artifacts/gap-host-150/new-session --pair --pair-plus-from artifacts/ble-host-142/timing-1/report.json --expect-initial-gap 20 --intervals-ms 21 20 1 0 --repetitions 5 --physical-press --execute
+```
+
+`--physical-press` stages one final pair at 20 ms and waits for
+`waiting_for_physical_C`. Press/release C once, then create the indicated
+`physical-C-confirmed` file. The script makes no TANK BLE queries during that
+waiting window. It checks the resulting state and restores the temporary
+assignments and live values. A stale confirmation file is refused. Without
+`--execute`, the command only describes its operations. The final global
+setting is 20 ms.
+
+## Further validation
+
+Factory reset and save/reset concurrency, additional hardware units, long
+SysEx, sustained Bluetooth load and actual USB wire/audio timing remain to be
+tested. In particular, delivery at adjacent settings such as 20/21 ms does not
+by itself measure their physical timing difference. Recovery from a nonbooting
+application after power loss remains unverified.

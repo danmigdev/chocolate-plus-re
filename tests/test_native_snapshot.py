@@ -31,8 +31,14 @@ class FakeMidi:
     def get_input_names(self): return ["SINCO 0"]
     def get_output_names(self): return ["SINCO 1"]
 
-    @staticmethod
-    def Message(kind, data): return SimpleNamespace(type=kind, data=data)
+    class Message:
+        def __init__(self, kind, data):
+            self.type, self.data = kind, data
+
+        @staticmethod
+        def from_bytes(data):
+            assert data == native.BOOT_COMMAND
+            return SimpleNamespace(type="boot", data=data)
 
     def port(self, incoming):
         owner = self
@@ -54,6 +60,10 @@ class FakeMidi:
     def open_output(self, name): return self.port(False)
 
     def send(self, message):
+        if message.type == "boot":
+            self.boot_sent_with_input_open = self.input_open
+            self.sent.append(0x7d)
+            return
         command, prefix = config.reply(message.data)
         self.sent.append(command)
         if command == 0x11:
@@ -84,9 +94,24 @@ class NativeTests(unittest.TestCase):
             packet, prefix = native.read_request(profile, native.APP_BASE, 512)
             self.assertEqual(config.reply(packet), (0x23, prefix))
 
-    def test_142_cannot_send_boot_request(self):
-        with tempfile.TemporaryDirectory() as path, self.assertRaises(ValueError):
-            native.capture(FakeMidi(), "142", Path(path) / "capture", enter_boot=True)
+    def test_142_boot_requires_audited_relocated_routine(self):
+        midi = FakeMidi()
+        profile = dict(native.PROFILES["142"], hashes={config.digest(midi.app)})
+        with tempfile.TemporaryDirectory() as path, patch.dict(native.PROFILES, {"142": profile}):
+            with self.assertRaisesRegex(ValueError, "boot routine differs"):
+                native.capture(midi, "142", Path(path) / "capture", enter_boot=True)
+        self.assertNotIn(0x7d, midi.sent)
+
+    def test_142_boot_sent_once_after_verified_capture_and_input_close(self):
+        midi = FakeMidi()
+        profile = dict(native.PROFILES["142"], hashes={config.digest(midi.app)})
+        with tempfile.TemporaryDirectory() as path, patch.dict(native.PROFILES, {"142": profile}), \
+                patch.object(native, "BOOT_SHA256", config.digest(bytes(native.BOOT_SIZE))):
+            report = native.capture(midi, "142", Path(path) / "capture", enter_boot=True)
+        self.assertFalse(midi.boot_sent_with_input_open)
+        self.assertEqual(midi.sent.count(0x7d), 1)
+        self.assertEqual(report["entry_requests"], 1)
+        self.assertTrue(report["ram_matches_saved_flash"])
 
     def test_complete_native_capture_matches_backup_and_never_writes(self):
         midi = FakeMidi()

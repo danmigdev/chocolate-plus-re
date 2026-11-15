@@ -151,22 +151,17 @@ def replace_journal(temporary, destination):
             time.sleep(0.025)
 
 
-def main():
-    parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--plan",type=Path,required=True)
-    parser.add_argument("--execute",action="store_true")
-    parser.add_argument("--restore",action="store_true",help="Restore original bytes in the same planned sectors")
-    args = parser.parse_args()
-    plan, original, patched = load_plan(args.plan)
-    target = original if args.restore else patched
-    if not args.execute:
-        print(json.dumps(dict(hardware_access=False,mode="restore" if args.restore else "install",
+def run_plan(directory, plan, original, patched, *, execute=False, restore=False):
+    """Execute a reconstructed plan; callers validate their own image format."""
+    target = original if restore else patched
+    if not execute:
+        print(json.dumps(dict(hardware_access=False,mode="restore" if restore else "install",
                               sector_order=plan["sector_order"],target_sha256=sha(target))))
         return
     require(os.name == "nt", "Windows SCSI transport required")
-    root = args.plan / ("restore-" if args.restore else "install-") / datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S.%fZ")
+    root = directory / ("restore-" if restore else "install-") / datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S.%fZ")
     root.mkdir(parents=True)
-    report = dict(mode="restore" if args.restore else "install",target_sha256=sha(target),
+    report = dict(mode="restore" if restore else "install",target_sha256=sha(target),
                   original_sha256=sha(original),events=[],status="starting",restart_sent=False)
 
     def record(status,**fields):
@@ -195,7 +190,7 @@ def main():
                 "SCSI target differs from BR25 ROM")
         verify_online_device(dev.reply(0xFC0A))
         require(int.from_bytes(dev.reply(0xFC14)[:4],"big") == 32768,"Loader buffer differs from verified diagnostic")
-        for number,data in enumerate(transfer(dev,original,target,args.restore,record),1):
+        for number,data in enumerate(transfer(dev,original,target,restore,record),1):
             with (root / f"verified-{number}.bin").open("xb") as file:
                 file.write(data)
                 file.flush()
@@ -210,6 +205,16 @@ def main():
             dev.close()
         record(report["status"])
         print(json.dumps({key:value for key,value in report.items() if key != "events"},indent=2))
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--plan",type=Path,required=True)
+    parser.add_argument("--execute",action="store_true")
+    parser.add_argument("--restore",action="store_true",help="Restore original bytes in the same planned sectors")
+    args = parser.parse_args()
+    plan, original, patched = load_plan(args.plan)
+    run_plan(args.plan, plan, original, patched, execute=args.execute, restore=args.restore)
 
 
 if __name__ == "__main__":
