@@ -3,10 +3,10 @@
 Everything needed to rebuild the custom firmware from the stock image.
 
 The default build below still reproduces upstream 142. A separate
-[experimental global SysEx gap extension](../docs/sysex-gap.md) builds a 150
-candidate with one persistent interval for all HOST banks (20 ms initially).
-The pinned 1-ms candidate has been installed and tested on one Chocolate Plus
-with a TANK Mini. See its hardware record and remaining validation limits.
+[HOST SysEx splitting extension](../docs/sysex-split.md) builds a 143 candidate
+that separates complete messages without any added or configurable interval.
+The exact 143 candidate is undergoing validation; the linked record distinguishes
+offline checks from the earlier experimental 150 hardware measurements.
 
 ```
 build.py          patches the original firmware 012 (checked by SHA-256) and writes FootCtrlPlus_142-dtnprt.fwsc

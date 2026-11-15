@@ -1,7 +1,7 @@
-"""Offline, device-specific exact 142 -> pinned 1-ms 150 migration.
+"""Prepare a pinned 142/150 -> 143 migration from two matching physical reads.
 
-Requires two identical physical backups. Reconstructs the complete target on
-every load; editable plan metadata cannot enlarge the allowed flash extent.
+Only application sectors may change. Shrinking from 150 removes its old module
+tail; boot, native VM banks, bonds and complete USRFLASH remain untouched.
 """
 from __future__ import annotations
 
@@ -16,52 +16,69 @@ except ImportError:
     from prepare_142 import (FULL_SIZE, SECTOR_SIZE, COMPACT_END, COMPACT_SHA256,
                              reservations, vm_geometry, read_backup, durable_write, require, sha)
 
-IMAGE_BYTES = 0x27A00
-IMAGE_SHA256 = "73e7a6013551812d2d0b1eb7d5c60d88231ff34de3b6adecb9d8659691aa7a20"
-APP_SHA256 = "9ed951513a3169c32fd80da564e4a5043915a54124446f8d4cddb7590a39a7c8"
-MODULE_SHA256 = "9c9e32ba6411ee48ac7480a003ee753b759dd208027ef9125b6dded0dfb8e774"
-MODULE_BASE, MODULE_BYTES = 0x1E265F0, 928
-IDENTITY = "FootCtrlPlus_150-gap"
+IMAGE_BYTES = 0x27700
+IMAGE_SHA256 = "963418009370c91927e85847968bae25157a0812c69bdec65c5654383b59221c"
+APP_SHA256 = "973b9817029e2863df5b925bf8547691ef4341c1ed5c0417daa476fb0b9a1433"
+MODULE_SHA256 = "0cd5d58e7017f2f3ff855cddd1a77f6235b9219c5de0ce385c5ac6483d517593"
+MODULE_BASE, MODULE_BYTES = 0x1E265F0, 116
+IDENTITY = "FootCtrlPlus_143-split"
+# Read-only identification of the installed experimental predecessor. No setting
+# endpoint or 150 installer is retained. --restore restores the fresh source.
+LEGACY_150 = dict(identity="FootCtrlPlus_150-gap", app_size=155536,
+    hashes={"9ed951513a3169c32fd80da564e4a5043915a54124446f8d4cddb7590a39a7c8"},
+    module_base=0x1E265F0, module_bytes=928,
+    module_sha256="9c9e32ba6411ee48ac7480a003ee753b759dd208027ef9125b6dded0dfb8e774")
+SOURCES = (("142", COMPACT_END, COMPACT_SHA256),
+           ("150", 0x27A00, "73e7a6013551812d2d0b1eb7d5c60d88231ff34de3b6adecb9d8659691aa7a20"))
+
+
+def source_profile(original):
+    require(len(original) == FULL_SIZE, "Expected complete 256-KiB physical backup")
+    matches = [item for item in SOURCES if sha(original[:item[1]]) == item[2]]
+    require(len(matches) == 1, "Source is not exact upstream 142 or pinned experimental 150")
+    return matches[0]
 
 
 def construct_target(original, compact):
-    require(len(original) == FULL_SIZE, "Expected complete 256-KiB physical backup")
-    require(sha(original[:COMPACT_END]) == COMPACT_SHA256, "Source is not exact upstream 142")
+    _, source_end, _ = source_profile(original)
     require(len(compact) == IMAGE_BYTES and sha(compact) == IMAGE_SHA256,
-            "Target is not the pinned one-millisecond 150 candidate")
+            "Target is not the pinned split-only 143 candidate")
     require(original[:0x1000] == compact[:0x1000], "Boot prefix changes")
-    require(original[COMPACT_END:IMAGE_BYTES] == b"\xff" * (IMAGE_BYTES - COMPACT_END),
-            "The extension would overwrite occupied bytes")
-    before, after = reservations(original[:COMPACT_END]), reservations(compact)
+    if source_end < IMAGE_BYTES:
+        require(original[source_end:IMAGE_BYTES] == b"\xff" * (IMAGE_BYTES - source_end),
+                "The extension would overwrite occupied bytes")
+    before, after = reservations(original[:source_end]), reservations(compact)
     for name, address, count in (("BTIF", 0x37000, 0x1000), ("EXIF", 0x38000, 0x1000),
                                  ("USRFLASH", 0x39000, 0x6000)):
         require(before[name] == after[name] == dict(offset=address, size=count, flags=0x92),
                 f"{name} reservation changes")
     geometry = dict(start=0x28000, second_bank=0x29000, bank_bytes=0x1000, end=0x2A000)
-    for records, end in ((before, COMPACT_END), (after, IMAGE_BYTES)):
+    for records, end in ((before, source_end), (after, IMAGE_BYTES)):
         require(records["PRCT"] == dict(offset=0, size=end, flags=0x92) and
                 records["VM"] == dict(offset=end, size=0x37000 - end, flags=0x12),
                 "Unexpected protected image or VM reservation")
         require(vm_geometry(end, records["VM"]["size"]) == geometry, "Native VM banks move")
-    target = compact + original[IMAGE_BYTES:]
+    preserved = max(source_end, IMAGE_BYTES)
+    target = compact + b"\xff" * (preserved - IMAGE_BYTES) + original[preserved:]
     changed = [pos for pos in range(0, FULL_SIZE, SECTOR_SIZE)
                if target[pos:pos + SECTOR_SIZE] != original[pos:pos + SECTOR_SIZE]]
     require(0x1000 in changed and all(0x1000 <= pos <= 0x27000 for pos in changed),
             "Unexpected application sector set")
     order = [pos for pos in changed if pos != 0x1000] + [0x1000]
-    require(target[:0x1000] == original[:0x1000] and target[IMAGE_BYTES:] == original[IMAGE_BYTES:],
+    require(target[:0x1000] == original[:0x1000] and target[preserved:] == original[preserved:],
             "Preserved device data changed")
     return target, order, geometry
 
 
 def details(original, target, order, geometry):
-    return dict(schema=1, migration="exact-142-to-pinned-150-1ms", status="prepared_NOT_INSTALLED",
-                source_image_bytes=COMPACT_END, candidate_image_bytes=IMAGE_BYTES,
-                compact_image_sha256=IMAGE_SHA256, source_compact_sha256=COMPACT_SHA256,
+    source, source_end, source_sha = source_profile(original)
+    return dict(schema=1, migration=f"pinned-{source}-to-split-143", status="prepared_NOT_INSTALLED",
+                source_image_bytes=source_end, candidate_image_bytes=IMAGE_BYTES,
+                compact_image_sha256=IMAGE_SHA256, source_compact_sha256=source_sha,
                 original_sha256=sha(original), target_sha256=sha(target), flash_bytes=FULL_SIZE,
-                preserved_from=IMAGE_BYTES, sector_order=order, vm_geometry=geometry,
+                preserved_from=max(source_end, IMAGE_BYTES), sector_order=order, vm_geometry=geometry,
                 configuration_sha256=sha(original[0x39000:0x3F000]), boot_unchanged=True,
-                default_gap_ms=20, gap_step_ms=1, max_gap_ms=1000,
+                added_wait_ms=0, configurable_gap=False,
                 sector_hashes=[dict(address=pos, original_sha256=sha(original[pos:pos + SECTOR_SIZE]),
                                     target_sha256=sha(target[pos:pos + SECTOR_SIZE])) for pos in order],
                 activation="Application sectors first; directory and CRC sector 0x1000 last",

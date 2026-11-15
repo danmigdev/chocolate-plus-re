@@ -1,16 +1,16 @@
-"""Pinned 150 migration, rollback and tamper rejection; never accesses hardware."""
+"""Pinned 143 migration, rollback and tamper rejection; never accesses hardware."""
 import json
 from pathlib import Path
 import tempfile
 import unittest
 
-from tools import prepare_gap_150 as gap
+from tools import prepare_split_143 as gap
 from tools.install_142 import transfer, verify_preserved
 from tests.test_install_142 import NorDevice
 
 ROOT = Path(__file__).resolve().parents[1]
-ORIGINAL = ROOT / "artifacts/migration-142/plan/target.bin"
-CANDIDATE = ROOT / "firmware/out/gap-150-1ms-candidate-1/FootCtrlPlus_150-gap.compact.bin"
+ORIGINAL = ROOT / "artifacts/migration-gap-150/plan/target.bin"
+CANDIDATE = ROOT / "firmware/out/split-143-candidate-1/FootCtrlPlus_143-split.compact.bin"
 
 
 @unittest.skipUnless(ORIGINAL.is_file() and CANDIDATE.is_file(), "Private firmware fixtures unavailable")
@@ -23,7 +23,7 @@ class MigrationTests(unittest.TestCase):
     def test_install_and_exact_rollback_with_seven_bounded_sectors(self):
         self.assertEqual(self.order, [0x10000, 0x12000, 0x13000, 0x19000, 0x1a000, 0x27000, 0x1000])
         verify_preserved(self.target, self.original, self.order)
-        self.assertEqual(self.target[gap.IMAGE_BYTES:], self.original[gap.IMAGE_BYTES:])
+        self.assertEqual(self.target[0x27A00:], self.original[0x27A00:])
         self.assertEqual(self.geometry["start"], 0x28000)
         dev = NorDevice(self.original, self.target, order=self.order)
         self.assertEqual(transfer(dev, self.original, self.target, False, lambda *a, **k: None),
@@ -33,7 +33,7 @@ class MigrationTests(unittest.TestCase):
                          (self.original, self.original))
 
     def test_occupied_extension_and_unknown_images_are_refused(self):
-        for offset in (0, 0x1120, gap.COMPACT_END, gap.IMAGE_BYTES - 1):
+        for offset in (0, 0x1120, 0x27700, 0x279FF):
             changed = bytearray(self.original)
             changed[offset] ^= 1
             with self.subTest(offset=offset), self.assertRaises(ValueError):
@@ -69,6 +69,21 @@ class MigrationTests(unittest.TestCase):
         restored = NorDevice(dev.memory, self.original, order=self.order)
         transfer(restored, self.original, self.original, True, lambda *a, **k: None)
         self.assertEqual(bytes(restored.memory), self.original)
+
+
+    def test_upstream_142_extension_is_bounded_and_requires_erased_space(self):
+        original = (ROOT / "artifacts/migration-142/plan/target.bin").read_bytes()
+        target, order, _ = gap.construct_target(original, self.compact)
+        self.assertEqual(target[gap.IMAGE_BYTES:], original[gap.IMAGE_BYTES:])
+        for offset in (gap.COMPACT_END, gap.IMAGE_BYTES - 1):
+            changed = bytearray(original)
+            changed[offset] = 0
+            with self.assertRaisesRegex(ValueError, "occupied"):
+                gap.construct_target(changed, self.compact)
+
+    def test_old_module_tail_is_erased_and_configuration_is_preserved(self):
+        self.assertEqual(self.target[gap.IMAGE_BYTES:0x27A00], b"\xff" * (0x27A00-gap.IMAGE_BYTES))
+        self.assertEqual(self.target[0x39000:0x3F000], self.original[0x39000:0x3F000])
 
 
 if __name__ == "__main__":

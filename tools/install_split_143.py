@@ -1,4 +1,4 @@
-"""Install/restore a pinned 142 -> 150 plan in the already running RAM loader.
+"""Install/restore a pinned 142/150 -> 143 plan in the running RAM loader.
 
 Uses the bounded sector transport with a separate, exact-image plan validator.
 No reset, loader upload or write outside the reconstructed plan is exposed.
@@ -7,10 +7,10 @@ import argparse
 from pathlib import Path
 
 try:
-    from .prepare_gap_150 import load_plan
+    from .prepare_split_143 import load_plan
     from .install_142 import run_plan
 except ImportError:
-    from prepare_gap_150 import load_plan
+    from prepare_split_143 import load_plan
     from install_142 import run_plan
 
 

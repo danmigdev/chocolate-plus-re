@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Build an offline experimental compact 150 image from exact upstream 142.
+"""Build an offline experimental compact 143 image from exact upstream 142.
 
 No device access, installer or OTA wrapper. Vendor binaries remain local.
 The existing 142 builder and its reproducible output are unchanged.
@@ -7,40 +7,87 @@ The existing 142 builder and its reproducible output are unchanged.
 from __future__ import annotations
 
 import argparse
+import binascii
 import hashlib
 import json
 from pathlib import Path
 import struct
 
 try:
-    from .prepare_142 import candidate_image, reservations, vm_geometry
-    from .audit_142 import crc, require, sha, VBASE
+    from .fwsctool import member_decrypt, fwsc_unwrap, xcode_block
 except ImportError:
-    from prepare_142 import candidate_image, reservations, vm_geometry
-    from audit_142 import crc, require, sha, VBASE
-from fwsctool import member_decrypt
+    from fwsctool import member_decrypt, fwsc_unwrap, xcode_block
 
-IDENTITY = "FootCtrlPlus_150-gap"
+VBASE = 0x1E00000
+COMPACT_SHA256 = "2c7160bbd55144344d19ce40ed24f64683f92e070cd9d0816be5a321af9659b7"
+BASELINE_FWSC_SHA256 = "eadd20b993b149753651f83a683d1af25fb4f966d340e0b269a33b300f2e3ba2"
+
+
+def require(condition, message):
+    if not condition:
+        raise ValueError(message)
+
+
+def sha(data):
+    return hashlib.sha256(data).hexdigest()
+
+
+def crc(data):
+    return binascii.crc_hqx(data, 0)
+
+
+def candidate_image(path):
+    data = path.read_bytes()
+    require(sha(data) == BASELINE_FWSC_SHA256, "Expected exact upstream 142 FWSC baseline")
+    ufw = fwsc_unwrap(data, "")
+    # The pinned complete package has eight members. Select its compact image.
+    matches = []
+    for index in range(8):
+        entry = xcode_block(ufw[64 + index * 80:144 + index * 80])
+        offset, size = struct.unpack_from("<II", entry, 8)
+        if bytes(entry[64:80]).split(b"\0", 1)[0] in (b"flash.bin", b"flash2.bin") and size == 0x27600:
+            matches.append(ufw[offset:offset + size])
+    require(len(matches) == 1 and sha(matches[0]) == COMPACT_SHA256, "Compact baseline differs")
+    return matches[0]
+
+
+def reservations(raw):
+    area = member_decrypt(raw[0x1000:], key=0x180F, pos=0x20000)
+    records = {}
+    for pos in range(0x60, 0x100, 32):
+        entry = area[pos:pos + 32]
+        require(crc(entry[2:]) == int.from_bytes(entry[:2], "little"),
+                "Reservation directory CRC mismatch.")
+        name = entry[16:32].split(b"\0", 1)[0].decode("ascii")
+        offset, size = struct.unpack_from("<II", entry, 4)
+        records[name] = dict(offset=offset, size=size, flags=entry[12])
+    require(set(records) == {"VM", "PRCT", "BTIF", "EXIF", "USRFLASH"},
+            "Unexpected reservation directory.")
+    return records
+
+
+def vm_geometry(start, size):
+    # Audited native 013 at 0x1e14da6..0x1e14e38 and 012/142 at
+    # 0x1e14ddc..0x1e14e8a: clamp to 16 KiB, force 4-KiB mode at that
+    # length, round start up to 4 KiB and usable length down to 8 KiB.
+    require(min(size, 16384) == 16384, "VM size outside the audited native branch.")
+    aligned = (start + 4095) & -4096
+    usable = (start + 16384 - aligned) & -8192
+    return dict(start=aligned, second_bank=aligned + usable // 2,
+                bank_bytes=usable // 2, end=aligned + usable)
+
+
+IDENTITY = "FootCtrlPlus_143-split"
 PATCH_ADDRESS = 0x1E265F0
 RESOURCE_HEADER = 0x265D0
 APP_OFFSET, APP_BYTES = 0x120, 155536
 SOURCE_DIR = Path(__file__).resolve().parents[1] / "firmware" / "patch_src"
-SOURCES = ("sysex_gap.c", "sysex_gap.h", "sysex_gap_glue.S", "sysex_gap.ld",
-           "test_sysex_gap.c", "build_sysex_gap.sh")
+SOURCES = ("sysex_split.c", "sysex_split.h", "sysex_split_glue.S", "sysex_split.ld",
+           "test_sysex_split.c", "build_sysex_split.sh")
 HOOKS = {
     "boundary": (0x1E0FF54, bytes.fromhex("78187518"), "ch_boundary_glue", "goto"),
-    "after_send": (0x1E11A16, bytes.fromhex("90eaae55"), "ch_after_send_glue", "call"),
-    "save": (0x1E125D2, bytes.fromhex("7704e294"), "ch_config_save", "goto"),
-    "read": (0x1E18B44, struct.pack("<I", 0x1E13B50), "ch_config_read", "pointer"),
-    "write": (0x1E18B48, struct.pack("<I", 0x1E13B5C), "ch_config_write", "pointer"),
 }
-BINDINGS = dict(native_output_callback=0x194A0, native_user_flash=0x19100, native_vm_flags=0x1A25D,
-                native_usb_buffer=0x1E11932, native_task_delay=0x2117D78,
-                native_irq_enable=0x201C576, native_irq_disable=0x201C54C,
-                native_clock_raw=0x201C606, native_settings_lock=0x1E1506E,
-                native_settings_unlock=0x1E15090, native_flash_read=0x1E0CD9C,
-                native_flash_write=0x1E0CD8E, native_config_read=0x1E13B50,
-                native_config_write=0x1E13B5C, native_save_continue=0x1E125D6,
+BINDINGS = dict(native_output_callback=0x194A0,
                 native_packet_return=0x1E1004C, native_packet_continue=0x1E0FF58)
 
 
@@ -59,7 +106,7 @@ def branch(data, address, kind):
 
 def read_module(directory):
     """Cross-check binary exports, native ABI, sections and linked hook targets."""
-    elf = (directory / "sysex-gap.elf").read_bytes()
+    elf = (directory / "sysex-split.elf").read_bytes()
     require(len(elf) >= 52 and elf[:7] == b"\x7fELF\x01\x01\x01", "Expected ELF32 little endian")
     fields = struct.unpack_from("<16sHHIIIIIHHHHHH", elf)
     _, kind, machine, version, entry, _, table, _, size, _, _, stride, count, strings = fields
@@ -91,8 +138,8 @@ def read_module(directory):
         if name:
             symbols[string(names, name)] = value
     require(all(symbols.get(n) == a for n, a in BINDINGS.items()), "Native ABI binding differs")
-    blob = (directory / "sysex-gap.bin").read_bytes()
-    require(0 < len(blob) <= 0x900 and sections[".patch"][3] == PATCH_ADDRESS and
+    blob = (directory / "sysex-split.bin").read_bytes()
+    require(0 < len(blob) <= 0x100 and sections[".patch"][3] == PATCH_ADDRESS and
             extent(sections[".patch"]) == blob, "Extension binary/address differs from ELF")
     require(entry == symbols["ch_boundary_glue"], "Wrong ELF entry")
     hooks = {}
@@ -104,30 +151,23 @@ def read_module(directory):
         require(target == symbols[symbol] and PATCH_ADDRESS <= target < PATCH_ADDRESS + len(blob),
                 f"Wrong hook target: {name}")
         hooks[name] = data
-    pos = symbols["native_save"] - PATCH_ADDRESS
-    require(blob[pos:pos + 4] == HOOKS["save"][1] and
-            branch(blob[pos + 4:pos + 8], symbols["native_save"] + 4, "goto") == 0x1E125D6,
-            "Save trampoline does not reproduce the displaced prologue")
-    pos = symbols["ch_after_send_glue"] - PATCH_ADDRESS
-    require(blob[pos:pos + 2] == bytes.fromhex("1004") and
-            branch(blob[pos + 2:pos + 6], symbols["ch_after_send_glue"] + 2, "call") ==
-            branch(HOOKS["after_send"][1], HOOKS["after_send"][0], "call"),
-            "After-send glue must restore native IRQs before entering C")
-    clock = symbols["ch_clock_half_ms"]
-    pos = clock - PATCH_ADDRESS
-    require(blob[pos:pos + 2] == bytes.fromhex("7404") and
-            blob[pos + 10:pos + 12] == bytes.fromhex("0416") and
-            blob[pos + 16:pos + 20] == bytes.fromhex("40165404"),
-            "Clock glue must preserve its return value and caller registers")
-    for offset, name in ((2, "native_irq_disable"), (6, "native_clock_raw"), (12, "native_irq_enable")):
-        require(branch(blob[pos + offset:pos + offset + 4], clock + offset, "call") ==
-                BINDINGS[name] & 0x1FFFFFF, f"Clock glue call differs: {name}")
+    glue = symbols["ch_boundary_glue"]
+    pos = glue - PATCH_ADDRESS
+    require(blob[pos:pos + 8] == bytes.fromhex("801671167818dd1d") and
+            blob[pos + 12:pos + 14] == bytes.fromhex("0042"),
+            "Boundary glue must preserve both displaced additions and the conditional")
+    for offset, name, kind in ((8, "ch_host_boundary", "call"), (14, "native_packet_return", "goto"),
+                                (18, "native_packet_continue", "goto")):
+        require(branch(blob[pos + offset:pos + offset + 4], glue + offset, kind) == symbols[name],
+                f"Boundary glue target differs: {name}")
+    require({name for name in symbols if name.startswith("native_")} == set(BINDINGS),
+            "Unexpected timer, flash or configuration binding")
     sources = {name: sha((SOURCE_DIR / name).read_bytes()) for name in SOURCES}
     require(json.loads((directory / "sources.json").read_text()) == sources,
             "Sources changed since compilation; rebuild the module")
     return blob, hooks, dict(elf_sha256=sha(elf), module_sha256=sha(blob),
                              module_bytes=len(blob), sources=sources,
-                             symbols={n: hex(symbols[n]) for n in (*BINDINGS, "native_save", "ch_clock_half_ms",
+                             symbols={n: hex(symbols[n]) for n in (*BINDINGS, "ch_host_boundary",
                                       *(v[2] for v in HOOKS.values()))})
 
 
@@ -147,8 +187,8 @@ def fix_entry(data, pos, payload=None):
 
 
 def patch_image(original, blob, hooks):
-    require(len(original) == 0x27600, "Expected compact 142 geometry")
-    require(0 < len(blob) <= 0x900 and set(hooks) == set(HOOKS), "Invalid extension/hook set")
+    require(len(original) == 0x27600 and sha(original) == COMPACT_SHA256, "Expected exact compact 142 baseline")
+    require(0 < len(blob) <= 0x100 and set(hooks) == set(HOOKS), "Invalid extension/hook set")
     full = member_decrypt(original[0x1000:], 0x180F, 0x20000)
     require(original[0x1000 + RESOURCE_HEADER:] == b"\xff" * 48, "Resource tail is occupied")
     d = bytearray(full[:RESOURCE_HEADER])
@@ -166,7 +206,7 @@ def patch_image(original, blob, hooks):
     old = b"FootCtrlPlus_142-dtnprt".ljust(27, b"\0")
     require(d[ident:ident + 27] == old and d[0x19308:0x19318] == b"   Uer142bAt\0nod", "Baseline identity/greeting differs")
     d[ident:ident + 27] = IDENTITY.encode().ljust(27, b"\0")
-    d[0x1930E:0x19311] = b"150"
+    d[0x1930E:0x19311] = b"143"
     padded_end = align(PATCH_ADDRESS - VBASE + len(blob), 32)
     image_end = align(0x1000 + padded_end, 256)
     require(image_end < 0x28000, "Compact extension would change native VM banks")
@@ -186,7 +226,7 @@ def patch_image(original, blob, hooks):
     fix_entry(d, 0x26590, digest)
     padded = blob + b"\xff" * (padded_end - (PATCH_ADDRESS - VBASE) - len(blob))
     header = bytearray(struct.pack("<HHIIBBH16s", 0, crc(padded), 32, 32 + len(padded),
-                                   0x82, 0xFF, 1, b"sysexgap.bin\0".ljust(16, b"\xff")))
+                                   0x82, 0xFF, 1, b"sysexsplit.bin\0".ljust(16, b"\xff")))
     fix_entry(header, 0)
     d.extend(header + padded)
     require(len(d) == padded_end, "Resource extent differs from link address")
@@ -218,14 +258,12 @@ def build(baseline, module, output):
     report.update(schema=1, identity=IDENTITY, status="offline_candidate_not_hardware_validated",
                   baseline="exact upstream 142", image_bytes=len(raw), image_sha256=sha(raw),
                   application_sha256=sha(plain[APP_OFFSET:APP_OFFSET + APP_BYTES]),
-                  default_gap_ms=20, gap_step_ms=1, max_gap_ms=1000,
-                  clock_unit_us=500, clock_quantization_guard_units=1,
+                  added_wait_ms=0, configurable_gap=False, patch_hooks=["boundary"],
                   vm=vm_geometry(0x27600, 0xFA00), device_access=False,
-                  hardware_tests_pending=["boot and USB/BLE enumeration", "native save/reset concurrency",
-                                          "persistent setting after U/H and power cycle",
+                  hardware_tests_pending=["boot and USB/BLE enumeration", "configuration preservation",
                                           "one key, multiple SysEx over HOST, measured timing"])
     output.mkdir(parents=True, exist_ok=False)
-    (output / "FootCtrlPlus_150-gap.compact.bin").write_bytes(raw)
+    (output / "FootCtrlPlus_143-split.compact.bin").write_bytes(raw)
     (output / "app-area.bin").write_bytes(plain)
     (output / "manifest.json").write_text(json.dumps(report, indent=2) + "\n", encoding="utf-8")
     return report

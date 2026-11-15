@@ -14,14 +14,14 @@ class FakeMidi:
         self.profile = profile
         self.identity = native.PROFILES[profile]["identity"]
         self.app = bytes([37]) * native.PROFILES[profile]["app_size"]
-        self.ram = bytes([17]) * config.CONFIG_SIZE
-        self.flash = self.ram + bytes(6) + b"usrdata\0" + b"\xff" * (0x6000 - 23660)
+        self.ram = bytes([17]) * config.CONFIG_SIZE + bytes(6)
+        self.flash = self.ram + b"usrdata\0" + b"\xff" * (0x6000 - 23660)
         self.original = bytes(0x39000) + self.flash + bytes(0x1000)
         self.memory = [(native.APP_BASE, self.app), (native.RAM_BASE, self.ram),
                        (native.USR_VIEW, self.flash), (0x19100, b"\x00\x90\x03\x00"),
-                       (native.BOOT_RAM, bytes(native.BOOT_SIZE))]
+                       (native.BOOT_RAM, bytes(native.BOOT_SIZE)), (0x193A0, bytes(260))]
         if unsaved:
-            self.memory[1] = (native.RAM_BASE, bytes(config.CONFIG_SIZE))
+            self.memory[1] = (native.RAM_BASE, bytes(native.NATIVE_CONFIG_BYTES))
         if bad_app:
             self.memory[0] = (native.APP_BASE, bytes(len(self.app)))
         self.pending, self.sent, self.reads = [], [], []
@@ -84,10 +84,34 @@ class FakeMidi:
 
 
 class NativeTests(unittest.TestCase):
+    def test_extension_mismatch_prevents_boot_for_143_and_legacy_150(self):
+        for name in ("143", "150"):
+            midi = FakeMidi(name)
+            profile = dict(native.PROFILES[name], hashes={config.digest(midi.app)})
+            midi.memory.append((profile["module_base"], bytes(profile["module_bytes"])))
+            with self.subTest(profile=name), tempfile.TemporaryDirectory() as path, \
+                    patch.dict(native.PROFILES, {name: profile}), \
+                    patch.object(native, "BOOT_SHA256", config.digest(bytes(native.BOOT_SIZE))):
+                with self.assertRaisesRegex(ValueError, "extension differs"):
+                    native.capture(midi, name, Path(path) / "capture", enter_boot=True)
+            self.assertNotIn(0x7d, midi.sent)
+
+    def test_unsaved_native_bluetooth_flag_is_detected_before_boot(self):
+        midi = FakeMidi()
+        ram = bytearray(midi.ram)
+        ram[23651] = 1
+        midi.memory[1] = (native.RAM_BASE, bytes(ram))
+        profile = dict(native.PROFILES["142"], hashes={config.digest(midi.app)})
+        with tempfile.TemporaryDirectory() as path, patch.dict(native.PROFILES, {"142": profile}), \
+                patch.object(native, "BOOT_SHA256", config.digest(bytes(native.BOOT_SIZE))):
+            with self.assertRaisesRegex(ValueError, "differ from saved flash"):
+                native.capture(midi, "142", Path(path) / "capture", enter_boot=True)
+        self.assertNotIn(0x7d, midi.sent)
+
     def test_fixed_ranges_reject_arbitrary_or_cross_boundary_reads(self):
         for profile in native.PROFILES:
             for address, size in ((0, 1), (native.RAM_BASE, 513),
-                                  (native.RAM_BASE + config.CONFIG_SIZE - 1, 2),
+                                  (native.RAM_BASE + native.NATIVE_CONFIG_BYTES - 1, 2),
                                   (native.USR_VIEW + 0x6000, 1), (0x1E40000, 256)):
                 with self.subTest(profile=profile, address=address), self.assertRaises(ValueError):
                     native.read_request(profile, address, size)

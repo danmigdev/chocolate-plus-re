@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Capture audited Chocolate Plus builds through read-only USB MIDI.
 
-Supports stock/paced 013, exact upstream 142, and the pinned 1-ms 150 candidate.
+Supports stock/paced 013, exact upstream 142, split-only 143 and legacy 150.
 The optional --enter-boot sends only the audited software boot request,
 after checking its application, RAM boot routine and saved configuration.
 No flash/configuration writes or arbitrary memory ranges are exposed.
@@ -18,13 +18,14 @@ import time
 try:
     from . import config_snapshot as config
     from .prepare_142 import load_plan, durable_write, require
-    from . import prepare_gap_150 as gap
+    from . import prepare_split_143 as split
 except ImportError:
     import config_snapshot as config
     from prepare_142 import load_plan, durable_write, require
-    import prepare_gap_150 as gap
+    import prepare_split_143 as split
 
 RAM_BASE, APP_BASE, USR_VIEW = 0x13490, 0x1E00120, 0x1E38000
+NATIVE_CONFIG_BYTES = 23652  # editor image plus six native state/settings bytes
 BOOT_RAM, BOOT_SIZE = 0x1C934, 28
 BOOT_SHA256 = "e3097a7fdbfa447c973df4975ab54e34b9e82f26fae1d927da847fde6c1efdf4"
 BOOT_COMMAND = bytes.fromhex("f0 22 24 35 7d f7")
@@ -36,17 +37,22 @@ PROFILES = {
                 hashes={"f535c717a1ce23ef1b0fe5251c0ab7c906f2be068d2c172ad8440be1e0edeadc", PACED_SHA256}),
     "142": dict(identity="FootCtrlPlus_142-dtnprt", app_size=155536,
                 hashes={"6affa33554ce40450f791afb1c6c8ca0d27da53ad82e1eb769a152a2fbec21f9"}),
-    "150": dict(identity=gap.IDENTITY, app_size=155536, hashes={gap.APP_SHA256}),
+    "143": dict(identity=split.IDENTITY, app_size=155536, hashes={split.APP_SHA256},
+                module_base=split.MODULE_BASE, module_bytes=split.MODULE_BYTES,
+                module_sha256=split.MODULE_SHA256),
+    "150": split.LEGACY_150,
 }
 
 
 def read_request(profile, address, size):
-    ranges = [(RAM_BASE, config.CONFIG_SIZE), (APP_BASE, PROFILES[profile]["app_size"]),
+    ranges = [(RAM_BASE, NATIVE_CONFIG_BYTES), (APP_BASE, PROFILES[profile]["app_size"]),
               (0x19100, 4), (USR_VIEW, 0x6000), (BOOT_RAM, BOOT_SIZE)]
     if profile == "013":
         ranges += [(MODULE_BASE, MODULE_SIZE)]
-    if profile == "150":
-        ranges += [(gap.MODULE_BASE, gap.MODULE_BYTES)]
+    if "module_base" in PROFILES[profile]:
+        ranges += [(PROFILES[profile]["module_base"], PROFILES[profile]["module_bytes"])]
+    if profile in ("142", "143", "150"):
+        ranges += [(0x193A0, 260)]
     require(0 < size <= 512 and any(start <= address < address + size <= start + length
                                    for start, length in ranges), "Outside audited native read ranges.")
     prefix = b"\x04" + (address - RAM_BASE).to_bytes(4, "little") + size.to_bytes(3, "little")
@@ -117,21 +123,28 @@ def capture(midi, profile, output, original=None, enter_boot=False):
                 if profile == "013" and app_sha == PACED_SHA256:
                     module = keep("pacing-module", read(MODULE_BASE, MODULE_SIZE))
                     require(config.digest(module) == MODULE_SHA256, "Installed pacing extension differs.")
-            if profile == "150":
-                module = keep("gap-module", read(gap.MODULE_BASE, gap.MODULE_BYTES))
-                require(config.digest(module) == gap.MODULE_SHA256, "Installed global gap extension differs.")
+            if "module_base" in PROFILES[profile]:
+                spec = PROFILES[profile]
+                module = keep("extension-module", read(spec["module_base"], spec["module_bytes"]))
+                require(config.digest(module) == spec["module_sha256"], "Installed extension differs.")
             require(int.from_bytes(read(0x19100, 4), "little") == 0x39000,
                     "Configuration flash pointer differs from audited map.")
-            ram1 = keep("configuration-1", read(RAM_BASE, config.CONFIG_SIZE))
+            ram1 = keep("configuration-1", read(RAM_BASE, NATIVE_CONFIG_BYTES))
             flash1 = keep("usrflash-1", read(USR_VIEW, 0x6000))
             flash2 = keep("usrflash-2", read(USR_VIEW, 0x6000))
-            ram2 = keep("configuration-2", read(RAM_BASE, config.CONFIG_SIZE))
+            ram2 = keep("configuration-2", read(RAM_BASE, NATIVE_CONFIG_BYTES))
             report.update(stable_ram=ram1 == ram2, stable_mapped_flash=flash1 == flash2,
                           ram_matches_saved_flash=ram1 == flash1[:len(ram1)],
                           configuration_sha256=config.digest(ram1), usrflash_sha256=config.digest(flash1))
             require(ram1 == ram2 and flash1 == flash2, "Native snapshots are unstable.")
             require(flash1[23652:23660] == b"usrdata\0", "Configuration marker differs.")
             require(ram1 == flash1[:len(ram1)], "RAM contains settings that differ from saved flash.")
+            if profile in ("142", "143", "150"):
+                state = keep("native-state", read(0x193A0, 260))
+                report["radio"] = dict(off_flag=ram1[23651], enabled=bool(state[168]),
+                    server_enabled=bool(state[164]), client_stage=state[5],
+                    server_handle=int.from_bytes(state[68:70], "little"),
+                    client_handle=int.from_bytes(state[70:72], "little"))
             if original is not None:
                 report.update(configuration_matches_backup=ram1 == original[0x39000:0x39000 + len(ram1)],
                               usrflash_matches_backup=flash1 == original[0x39000:0x3F000])
@@ -159,12 +172,12 @@ def main():
     parser.add_argument("--profile", choices=PROFILES, required=True)
     parser.add_argument("--output", type=Path, required=True, help="New capture directory")
     parser.add_argument("--plan", type=Path, help="Also compare to this plan's original configuration")
-    parser.add_argument("--gap-plan", type=Path, help="Compare configuration to a 142-to-150 plan")
+    parser.add_argument("--split-plan", type=Path, help="Compare configuration to a 142/150-to-143 plan")
     parser.add_argument("--enter-boot", action="store_true", help="Enter ROM after verified code, boot routine and captures")
     args = parser.parse_args()
     try:
-        require(not (args.plan and args.gap_plan), "Choose only one migration plan")
-        original = gap.load_plan(args.gap_plan)[1] if args.gap_plan else load_plan(args.plan)[1] if args.plan else None
+        require(not (args.plan and args.split_plan), "Choose only one migration plan")
+        original = split.load_plan(args.split_plan)[1] if args.split_plan else load_plan(args.plan)[1] if args.plan else None
         import mido
         print(json.dumps(capture(mido, args.profile, args.output, original, args.enter_boot), indent=2))
     except (ValueError, OSError, ImportError, RuntimeError) as error:

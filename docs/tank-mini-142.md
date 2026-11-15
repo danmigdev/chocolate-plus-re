@@ -847,12 +847,11 @@ pacing source already attempted boundary splitting and a delay, but its
 unsuccessful hardware test is not evidence that the same change works on 142;
 any new candidate still needs validation on the current reproducible setup.
 
-### Configurable interval follow-up
+### HOST message splitting follow-up
 
-The selected design uses one global interval for all switches and banks,
-initially 20 ms. The [experimental 150 extension](sysex-gap.md) implements
-HOST message splitting, a persistent setting and a Windows configuration
-command, with steps of 1 ms. On 15 November 2026 the pinned build was installed
-and passed the documented HOST delivery tests. Exact upstream 142 remains the
-comparison baseline and the unchanged default build; see the linked hardware
-record for 150 results and remaining validation limits.
+Experimental 150 combined HOST splitting with a global configurable interval.
+On 15 November 2026 it passed five paired trials even with zero added wait.
+The [143-split candidate](sysex-split.md) therefore removes the timer, persistent
+setting and configuration endpoint, retaining only the HOST message boundary
+change. Its own hardware validation remains pending. Exact upstream 142 is
+the comparison baseline and the unchanged default build.
