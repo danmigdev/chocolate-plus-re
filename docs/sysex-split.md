@@ -10,8 +10,10 @@ for comparison; the additional builder creates the candidate described here.
 The candidate has passed 129 Python tests and the C checks described below.
 On 15 November 2026 it replaced the experimental 150 on the physical controller:
 two complete physical flash reads matched the installation target, and the
-application and module hashes matched again after a cold boot. Exact 143 HOST
-delivery validation is still pending. The earlier experimental
+application and module hashes matched again after a cold boot. The exact 143
+then passed **10 automatic paired-message trials and one physical C press**
+on the direct HOST connection, with both original device states restored.
+The earlier experimental
 150 and its hardware results are recorded in
 [the previous implementation](https://github.com/danmigdev/chocolate-plus-re/blob/c9a29e9d8a462d8de3c71efe356680bc73f860e2/docs/sysex-gap.md).
 No TANK Mini firmware is changed by this work.
@@ -19,7 +21,7 @@ No TANK Mini firmware is changed by this work.
 A focused review branch, `pr/143-host-sysex-split`, starts at upstream `dev`
 (`16a405f`) and contains the standalone firmware builder, patch sources,
 build tests and firmware documentation. It produces the identical compact
-image. The pull request will be opened after the exact 143 hardware test.
+image. The pull request targets upstream `dev` after that hardware validation.
 
 ## What changes
 
@@ -137,6 +139,17 @@ retired the validated legacy 150 footer. Two complete saved-region reads matched
 the expected result. This is a configuration correction, not another firmware
 patch; it does not establish that the PC can open the Chocolate's GATT service.
 
+Initial GATT connections timed out despite that active radio. A later USB
+diagnostic showed an incoming native connection while Windows reported the
+Chocolate disconnected. That connection remained present with the PC radio
+off, then cleared after the user switched off another nearby Bluetooth device.
+With that device off, one native radio off/on cycle over USB let the PC reserve
+the TANK link first, associate the Chocolate and read `FootCtrlPlus_143-split`
+over AE40. Both native radio transitions completed, and the full original
+configuration and TANK snapshot were verified unchanged. No additional firmware
+patch was needed. Keep other automatically reconnecting Bluetooth peers off
+while using the two-PC-link acceptance procedure below.
+
 ## Direct HOST acceptance
 
 Connect the PC to TANK via Bluetooth while Chocolate is off, then start
@@ -162,3 +175,31 @@ data is refused. Original backups are retained; subsequent recovery uses
 the reported normalized directory. No old virtual setting request is sent.
 
 Delivery readback is not a passive USB traffic capture or timing measurement.
+
+### Exact 143 results, 15 November 2026
+
+`artifacts/split-host-143/session-4/report.json` completed with the exact
+application and module above. Neither device had a USB connection to the PC;
+the PC used two BLE configuration links. The Plus reported HOST port 1,
+output callback `0x1e119ae` and no native Bluetooth client connection.
+
+| Trigger for the C bank containing both messages | Complete targets matched |
+| --- | --- |
+| One native C event, generated automatically | 10 / 10 |
+| One user-confirmed physical C press | 1 / 1 |
+
+Each trial started with FX on and REV Mix 47, then reached FX off and REV Mix
+73. All 92 live-patch bytes matched the expected result; no other live parameter
+changed during delivery, preset state remained unchanged, and the C toggle
+changed exactly once. The firmware has no added wait and no interval setting.
+
+After each group, full Plus configuration RAM, saved configuration and toggle
+state matched the backups. The full TANK live patch, preset state and saved
+RAM/flash bank also matched the original snapshot. There were no restoration
+errors. The acceptance run made 52 bounded Plus configuration/runtime writes
+and 52 TANK live writes, with zero firmware writes or saved TANK preset writes.
+The temporary C/D assignments were removed; the original assignments remain.
+
+Sessions 1-3 stopped before staging any test settings because the Chocolate
+BLE connection was unavailable. They are connection failures, not failed
+SysEx-delivery trials; the incoming connection conflict is described above.

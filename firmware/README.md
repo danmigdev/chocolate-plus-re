@@ -5,8 +5,9 @@ Everything needed to rebuild the custom firmware from the stock image.
 The default build below still reproduces upstream 142. A separate
 [HOST SysEx splitting extension](../docs/sysex-split.md) builds a 143 candidate
 that separates complete messages without any added or configurable interval.
-The exact 143 candidate is undergoing validation; the linked record distinguishes
-offline checks from the earlier experimental 150 hardware measurements.
+The exact 143 candidate passed ten automatic paired-message trials and one
+physical C press on Chocolate Plus HOST -> TANK Mini. The linked record includes
+installation checks, complete state restoration and remaining test limits.
 
 ```
 build.py          patches the original firmware 012 (checked by SHA-256) and writes FootCtrlPlus_142-dtnprt.fwsc
