@@ -10,8 +10,10 @@ added delay. This candidate retains only that boundary change.
 **143-split is a candidate build number, not an upstream release.**
 The existing `build.py` remains unchanged and reproduces the 142 baseline.
 `split_143.py` builds the compact experimental image; it does not produce an
-OTA installer. The exact 143 candidate has passed offline validation, with
-physical installation and delivery validation still pending.
+OTA installer. The exact 143 candidate has passed offline validation and was
+installed on 15 November 2026. Two complete physical flash reads matched the
+target, and the application and module hashes matched after a cold boot with
+the original configuration preserved. HOST delivery validation is still pending.
 
 ## Patch behavior
 
